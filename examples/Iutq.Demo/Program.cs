@@ -36,12 +36,24 @@ public static class GameTimelines
     public static readonly TimelineKey Dash = new(0xA771000000000002UL);
 }
 
-public struct ForceAccumulator : IClipFrameVisitor<ForceClip>
+public struct ForceAccumulator : IClipSampleVisitor<ForceClip>
 {
     public float Forward;
     public float Up;
 
-    public void Visit(in ClipHit hit, in ForceClip clip)
+    public void Sample(in TrackInstance track, in ForceClip clip, float weight)
+    {
+        Forward += clip.Forward * weight;
+        Up += clip.Up * weight;
+    }
+}
+
+public struct TotalForceVisitor : IClipFrameVisitor<ForceClip>
+{
+    public float Forward;
+    public float Up;
+
+    public void Visit(in TrackInstance track, in ClipHit hit, in ForceClip clip)
     {
         Forward += clip.Forward * hit.Weight;
         Up += clip.Up * hit.Weight;
@@ -52,7 +64,7 @@ public struct DamageTransitions : IClipTransitionVisitor<DamagePulseClip>
 {
     public int Damage;
 
-    public void Clip(in ClipTransition transition, in DamagePulseClip clip)
+    public void Clip(in TrackInstance track, in ClipTransition transition, in DamagePulseClip clip)
     {
         if (transition.Phase == ClipPhase.Enter)
         {
@@ -61,6 +73,7 @@ public struct DamageTransitions : IClipTransitionVisitor<DamagePulseClip>
     }
 
     public void Blend(
+        in TrackInstance track,
         in BlendTransition transition,
         in DamagePulseClip clipA,
         in DamagePulseClip clipB)
@@ -150,12 +163,20 @@ public static class ForceSystem
     {
         DatabaseView db = runtime.Database.AsView();
         ClipQuery<ForceClip> force = db.Query(runtime.Force);
-        ForceAccumulator accumulator = default;
+        int[] bindingEntity = [0];
+        Span<ForceAccumulator> accumulators = stackalloc ForceAccumulator[1];
 
-        force.Visit(activeTimelines, ref accumulator);
+        foreach (ref readonly TimelineCursor cursor in activeTimelines)
+        {
+            foreach (ref readonly TrackInstance track in force.Tracks(cursor.Timeline))
+            {
+                ref ForceAccumulator accumulator = ref accumulators[bindingEntity[track.Binding]];
+                force.Sample(in track, cursor.Tick, ref accumulator);
+            }
+        }
 
-        forward = accumulator.Forward;
-        up = accumulator.Up;
+        forward = accumulators[0].Forward;
+        up = accumulators[0].Up;
     }
 }
 
@@ -184,12 +205,19 @@ public static class Program
         playerTimelines[0] = new TimelineCursor(runtime.LightAttack, 8, TimelineDirection.Forward);
         playerTimelines[1] = new TimelineCursor(runtime.Dash, 3, TimelineDirection.Forward);
 
-        ForceSystem.Execute(runtime, playerTimelines, out float forward, out float up);
+        ForceSystem.Execute(runtime, playerTimelines, out float entityForward, out float entityUp);
+
+        DatabaseView db = runtime.Database.AsView();
+        ClipQuery<ForceClip> force = db.Query(runtime.Force);
+        TotalForceVisitor visitor = default;
+        force.Visit(playerTimelines, ref visitor);
+
         int damage = DamageSystem.CatchUp(
             runtime,
             new TimelineSpan(runtime.LightAttack, 6, 7));
 
-        Console.WriteLine($"Force: {forward}, {up}");
+        Console.WriteLine($"Force (entity loop): {entityForward}, {entityUp}");
+        Console.WriteLine($"Force (visit): {visitor.Forward}, {visitor.Up}");
         Console.WriteLine($"Damage: {damage}");
     }
 }

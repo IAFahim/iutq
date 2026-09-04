@@ -134,31 +134,67 @@ Bake-time work: payload interning, clip-window interning, `TrackData` interning,
 
 `TimelineDatabase.Load(ReadOnlySpan<byte>)` re-validates from scratch: magic `IUTQ` (`0x49555451`), blob format version, FNV-1a 64 payload hash, section layout consistency, sorted lookup/types, in-bounds clip windows, lane monotonicity, boundary windows re-derived from the clips they index, and directory contiguity. The runtime never redoes any of it.
 
-## System query
+## Queries — three levels
 
-```cs
-public struct ForceAccumulator : IClipFrameVisitor<ForceClip>
-{
-    public float Forward;
-    public float Up;
-
-    public void Visit(in ClipHit hit, in ForceClip clip)
-    {
-        Forward += clip.Forward * hit.Weight;
-        Up += clip.Up * hit.Weight;
-    }
-}
-```
+Resolve once, query every frame:
 
 ```cs
 DatabaseView db = database.AsView();
 ClipQuery<ForceClip> force = db.Query(forceHandle);
-ForceAccumulator accumulator = default;
-
-force.Visit(activeTimelines, ref accumulator);
 ```
 
-`activeTimelines` is caller-owned memory — an ECS buffer, native slice, stack span, arena range or any other storage. Single hits are also available without a visitor via `Frame(in track, tick, direction)` returning a stack-allocated `ClipFrameEnumerator` (at most two hits: a crossfade pair).
+### Level 1 — raw, maximum control
+
+```cs
+foreach (ref readonly TimelineCursor cursor in activeTimelines)
+{
+    foreach (ref readonly TrackInstance track in force.Tracks(cursor.Timeline))
+    {
+        int entity = bindingEntity[track.Binding];
+
+        foreach (ClipSample sample in force.Sample(in track, cursor.Tick))
+        {
+            ref readonly ForceClip clip = ref force.Data(in sample);
+            forces[entity] += clip.Forward * sample.Weight;
+        }
+    }
+}
+```
+
+`Tracks(timelineId)` returns a dense `ReadOnlySpan<TrackInstance>`; `TrackData(in track)` and `Track(in track)` expose the interned shared content (mode, clip window, lane split); `Sample(in track, tick)` yields at most two 8-byte `ClipSample { DataOffset, Weight }`; `Data(...)` returns the payload by ref. Sampling is direction-free.
+
+The engine never learns what a binding maps to — entity, component index, bone, physics body or network entity. That lookup belongs to the consuming system, which owns the outer loop at this level.
+
+### Level 2 — rich lifecycle frames
+
+```cs
+foreach (ClipHit hit in force.Frame(in track, in cursor))
+{
+    if (hit.Phase == ClipPhase.Enter) { ... }
+}
+```
+
+`ClipHit` carries the clip window, direction, `BlendPhase`, ease, weight and blend factor, plus computed `Phase` (Enter/Stay/Exit — reverse-aware, pulse-aware) and eased `Progress`. Fused forms: `Frame(in track, tick, direction, ref visitor)` for one track and `Visit(activeTimelines, ref visitor)` across cursors.
+
+### Level 3 — fused weight-only pass
+
+```cs
+public struct ForceAccumulator : IClipSampleVisitor<ForceClip>
+{
+    public float Forward;
+
+    public void Sample(in TrackInstance track, in ForceClip clip, float weight) =>
+        Forward += clip.Forward * weight;
+}
+```
+
+```cs
+force.Sample(activeTimelines, ref accumulator);
+```
+
+The fastest common case: track identity + payload + weight, nothing else constructed. Per-track fused form: `Sample(in track, tick, ref visitor)`. Level 3 is an optimized helper and is never required — every level composes with the others.
+
+`activeTimelines` is caller-owned memory — an ECS buffer, native slice, stack span, arena range or any other storage.
 
 ## Skipped ticks and rewind
 
@@ -169,7 +205,7 @@ TimelineSpan movement = new(timeline, previousRawTick, currentRawTick);
 query.TraverseTransitions(in movement, ref transitionVisitor);
 ```
 
-The baker stores a sorted boundary index per interned `TrackData`; traversal binary-searches that immutable window and emits `ClipTransition`/`BlendTransition` occurrences with absolute `OccurrenceTick`s. Forward and reverse traversal both support looping raw ticks across multiple cycles. One-frame clips therefore replace V2's separate event model while surviving skipped ticks and rewind.
+The baker stores a sorted boundary index per interned `TrackData`; traversal binary-searches that immutable window and emits `ClipTransition`/`BlendTransition` occurrences with absolute `OccurrenceTick`s. Forward and reverse traversal both support looping raw ticks across multiple cycles, and a per-track overload (`TraverseTransitions(in track, in span, ref visitor)`) serves systems that own the outer track loop. One-frame clips therefore replace V2's separate event model while surviving skipped ticks and rewind.
 
 ## Removed from V2
 
@@ -194,33 +230,38 @@ bench/Iutq.Bench      BenchmarkDotNet harness
 
 ## Benchmarks
 
-BenchmarkDotNet, .NET 10, Ryzen 5 8500G (`bench/Iutq.Bench`). Frame benchmarks include the per-frame setup (`AsView` + `Query` + `Tracks`):
+BenchmarkDotNet, .NET 10, Ryzen 5 8500G (`bench/Iutq.Bench`). Frame/Sample benchmarks include the per-frame setup (`AsView` + `Query` + `Tracks`):
 
 | Method                   | Mean      | Allocated |
 |-------------------------- |----------:|----------:|
-| FrameExclusive           | 22.14 ns  | 0 B       |
-| FrameCrossFade           | 25.70 ns  | 0 B       |
-| VisitOneCursor           | 18.83 ns  | 0 B       |
-| VisitEightCursors        | 47.74 ns  | 0 B       |
-| TraverseForwardOneTick   | 39.98 ns  | 0 B       |
-| TraverseForwardFullLoop  | 55.09 ns  | 0 B       |
-| TraverseRewindTwentyFive | 54.70 ns  | 0 B       |
-| QuerySetupOnly           | 12.44 ns  | 0 B       |
+| FrameExclusive           | 16.01 ns  | 0 B       |
+| FrameCrossFade           | 20.26 ns  | 0 B       |
+| SampleExclusive          | 15.96 ns  | 0 B       |
+| SampleCrossFade          | 19.48 ns  | 0 B       |
+| SampleFusedOneTrack      | 17.46 ns  | 0 B       |
+| SampleEightCursors       | 44.07 ns  | 0 B       |
+| VisitOneCursor           | 17.95 ns  | 0 B       |
+| VisitEightCursors        | 45.22 ns  | 0 B       |
+| TraverseForwardOneTick   | 37.56 ns  | 0 B       |
+| TraverseForwardFullLoop  | 49.66 ns  | 0 B       |
+| TraverseRewindTwentyFive | 48.45 ns  | 0 B       |
+| QuerySetupOnly           | 11.65 ns  | 0 B       |
 
 Same machine, V2 (`TimelineEngine`) comparison — steady-state loops with setup hoisted, best of 7, 20M ops, identical clip windows and payloads:
 
 | scenario                              | V2 ns/op | V3 ns/op | V3/V2 |
 |--------------------------------------- |---------:|---------:|------:|
-| sample exclusive (per sample)         |     3.541 |     4.772 | 1.35  |
-| sample normalized / crossfade         |     6.164 |     8.960 | 1.45  |
-| full frame per instance/cursor        |     9.327 |     6.894 | 0.74  |
-| traverse 64-tick loop span (5 events) |     9.851 |    35.735 | 3.63  |
+| sample exclusive (per sample)         |     3.317 |     4.409 | 1.33  |
+| sample normalized / crossfade         |     5.791 |     8.388 | 1.45  |
+| full frame per instance/cursor        |     9.277 |     6.353 | 0.69  |
+| traverse 64-tick loop span (5 events) |     9.389 |    31.646 | 3.37  |
 
 Read honestly:
 
-- The bare per-sample kernel is ~1.35x V2. V3 stages a full `ClipHit` and lets the consuming system compute progress/ease/payload reads; V2 fuses search + ease + interpolation into one call returning the final value. That is the cost of "payload is data, behavior belongs to the system".
-- The whole-frame idiom is 26% faster than V2's full instance tick: the type handle is resolved once, the type-major directory is dense integer indexing, and there is no instance pool, no per-instance type-cache traffic and no clock ownership.
-- Transition traversal is ~36 ns absolute per 64-tick looping span but 3.6x V2's dedicated event rows: boundary rows carry clip indices and payload offsets (12 B) and blend emissions reference two payloads, versus V2's minimal event headers. Traversal is catch-up work, not a per-sample path.
+- The bare per-sample kernel is ~1.33x V2. V3 stages a `ClipHit`/`ClipSample` and lets the consuming system compute progress/ease/payload reads; V2 fuses search + ease + interpolation into one call returning the final value. That is the cost of "payload is data, behavior belongs to the system".
+- The whole-frame idiom is 31% faster than V2's full instance tick: the type handle is resolved once, the type-major directory is dense integer indexing, and there is no instance pool, no per-instance type-cache traffic and no clock ownership.
+- The weight-only Level-3 pass (`SampleEightCursors`, 44.07 ns) edges out the hit-carrying `VisitEightCursors` (45.22 ns) on the same cursor span — the level split pays without giving anything up.
+- Transition traversal is ~32 ns absolute per 64-tick looping span but ~3.4x V2's dedicated event rows: boundary rows carry clip indices and payload offsets (12 B) and blend emissions reference two payloads, versus V2's minimal event headers. Traversal is catch-up work, not a per-sample path.
 - Zero allocations in every engine, every scenario.
 
 ## Guarantees

@@ -25,10 +25,22 @@ public struct WeightedSum : IClipFrameVisitor<BenchClip>
     public float A;
     public float B;
 
-    public void Visit(in ClipHit hit, in BenchClip clip)
+    public void Visit(in TrackInstance track, in ClipHit hit, in BenchClip clip)
     {
         A += clip.A * hit.Weight;
         B += clip.B * hit.Weight;
+    }
+}
+
+public struct SampleSum : IClipSampleVisitor<BenchClip>
+{
+    public float A;
+    public float B;
+
+    public void Sample(in TrackInstance track, in BenchClip clip, float weight)
+    {
+        A += clip.A * weight;
+        B += clip.B * weight;
     }
 }
 
@@ -36,9 +48,9 @@ public struct TransitionCounter : IClipTransitionVisitor<BenchClip>
 {
     public int Count;
 
-    public void Clip(in ClipTransition transition, in BenchClip clip) => Count++;
+    public void Clip(in TrackInstance track, in ClipTransition transition, in BenchClip clip) => Count++;
 
-    public void Blend(in BlendTransition transition, in BenchClip clipA, in BenchClip clipB) => Count++;
+    public void Blend(in TrackInstance track, in BlendTransition transition, in BenchClip clipA, in BenchClip clipB) => Count++;
 }
 
 public sealed class TimelineConfig : ManualConfig
@@ -137,7 +149,7 @@ public class TimelineBenchmarks
 
         while (frame.MoveNext())
         {
-            ref readonly BenchClip clip = ref query.Data(frame.Current);
+            ref readonly BenchClip clip = ref query.Data(frame.Current.DataOffset);
             sum.A += clip.A * frame.Current.Weight;
             sum.B += clip.B * frame.Current.Weight;
         }
@@ -156,11 +168,70 @@ public class TimelineBenchmarks
 
         while (frame.MoveNext())
         {
-            ref readonly BenchClip clip = ref query.Data(frame.Current);
+            ref readonly BenchClip clip = ref query.Data(frame.Current.DataOffset);
             sum.A += clip.A * frame.Current.Weight;
             sum.B += clip.B * frame.Current.Weight;
         }
 
+        return sum.A + sum.B;
+    }
+
+    [Benchmark]
+    public float SampleExclusive()
+    {
+        DatabaseView view = _dbExclusive.AsView();
+        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        TrackInstance track = query.Tracks(_timelineIds[0])[0];
+        ClipSampleEnumerator samples = query.Sample(in track, 24);
+        float sum = 0f;
+
+        while (samples.MoveNext())
+        {
+            ClipSample sample = samples.Current;
+            ref readonly BenchClip clip = ref query.Data(sample.DataOffset);
+            sum += (clip.A + clip.B) * sample.Weight;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public float SampleCrossFade()
+    {
+        DatabaseView view = _dbCrossFade.AsView();
+        ClipQuery<BenchClip> query = view.Query(_handleCrossFade);
+        TrackInstance track = query.Tracks(_crossFadeTimeline)[0];
+        ClipSampleEnumerator samples = query.Sample(in track, 18);
+        float sum = 0f;
+
+        while (samples.MoveNext())
+        {
+            ClipSample sample = samples.Current;
+            ref readonly BenchClip clip = ref query.Data(sample.DataOffset);
+            sum += (clip.A + clip.B) * sample.Weight;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public float SampleFusedOneTrack()
+    {
+        DatabaseView view = _dbExclusive.AsView();
+        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        TrackInstance track = query.Tracks(_timelineIds[0])[0];
+        SampleSum acc = default;
+        query.Sample(in track, 24, ref acc);
+        return acc.A + acc.B;
+    }
+
+    [Benchmark]
+    public float SampleEightCursors()
+    {
+        DatabaseView view = _dbExclusive.AsView();
+        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        SampleSum sum = default;
+        query.Sample(_eightCursors.AsSpan(), ref sum);
         return sum.A + sum.B;
     }
 

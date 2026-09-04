@@ -25,7 +25,7 @@ public struct TransitionRecorder : IClipTransitionVisitor<TestClip>
     public int BlendExit;
     public int Value;
 
-    public void Clip(in ClipTransition transition, in TestClip clip)
+    public void Clip(in TrackInstance track, in ClipTransition transition, in TestClip clip)
     {
         if (transition.Phase == ClipPhase.Enter)
         {
@@ -39,6 +39,7 @@ public struct TransitionRecorder : IClipTransitionVisitor<TestClip>
     }
 
     public void Blend(
+        in TrackInstance track,
         in BlendTransition transition,
         in TestClip clipA,
         in TestClip clipB)
@@ -115,26 +116,12 @@ public sealed class TimelineQueryTests
     [Fact]
     public void CrossFadePhases()
     {
-        DatabaseBuilder builder = new();
-        TimelineId timeline = builder.AddTimeline(new TimelineKey(2), 20);
-        TestClip a = new(1);
-        TestClip b = new(2);
+        TimelineDatabase db = BuildCrossFade();
 
-        builder.AddTrack(
-            timeline,
-            TestTypes.Clip,
-            new BindingId(0),
-            TrackMode.CrossFade,
-            [
-                Clip.Range(0, 5, in a),
-                Clip.Range(3, 8, in b),
-            ]);
-
-        TimelineDatabase db = builder.Build();
         ClipHandle<TestClip> handle = db.Resolve(TestTypes.Clip);
         DatabaseView view = db.AsView();
         ClipQuery<TestClip> query = view.Query(handle);
-        TrackInstance track = query.Tracks(timeline)[0];
+        TrackInstance track = query.Tracks(new TimelineId(0))[0];
 
         ClipHit[] start = ReadFrame(query.Frame(in track, 3, TimelineDirection.Forward));
         Assert.Equal(2, start.Length);
@@ -233,13 +220,147 @@ public sealed class TimelineQueryTests
         Assert.Equal(0L, after - before);
     }
 
+    [Fact]
+    public void SampleExclusiveSingleUnitWeight()
+    {
+        TimelineDatabase db = BuildSingleTrack(
+            32,
+            TrackMode.Exclusive,
+            Clip.Range(10, 15, new TestClip(1)));
+
+        ClipHandle<TestClip> handle = db.Resolve(TestTypes.Clip);
+        DatabaseView view = db.AsView();
+        ClipQuery<TestClip> query = view.Query(handle);
+        TrackInstance track = query.Tracks(new TimelineId(0))[0];
+
+        ClipSampleEnumerator samples = query.Sample(in track, 12);
+
+        Assert.True(samples.MoveNext());
+        Assert.Equal(1f, samples.Current.Weight, precision: 4);
+        Assert.Equal(1, query.Data(samples.Current.DataOffset).Value);
+        Assert.False(samples.MoveNext());
+
+        ClipSampleEnumerator none = query.Sample(in track, 5);
+        Assert.False(none.MoveNext());
+    }
+
+    [Fact]
+    public void SampleCrossFadeWeightsSumToOne()
+    {
+        TimelineDatabase db = BuildCrossFade();
+
+        ClipHandle<TestClip> handle = db.Resolve(TestTypes.Clip);
+        DatabaseView view = db.AsView();
+        ClipQuery<TestClip> query = view.Query(handle);
+        TrackInstance track = query.Tracks(new TimelineId(0))[0];
+
+        ClipSampleEnumerator blend = query.Sample(in track, 4);
+
+        Assert.True(blend.MoveNext());
+        ClipSample first = blend.Current;
+        Assert.True(blend.MoveNext());
+        ClipSample second = blend.Current;
+        Assert.False(blend.MoveNext());
+        Assert.Equal(1f, first.Weight + second.Weight, precision: 4);
+        Assert.Equal(1, query.Data(first.DataOffset).Value);
+        Assert.Equal(2, query.Data(second.DataOffset).Value);
+
+        ClipSampleEnumerator tail = query.Sample(in track, 6);
+
+        Assert.True(tail.MoveNext());
+        Assert.Equal(1f, tail.Current.Weight, precision: 4);
+        Assert.Equal(2, query.Data(tail.Current.DataOffset).Value);
+        Assert.False(tail.MoveNext());
+    }
+
+    [Fact]
+    public void SampleFusedMatchesVisit()
+    {
+        TimelineDatabase db = BuildCrossFade();
+
+        ClipHandle<TestClip> handle = db.Resolve(TestTypes.Clip);
+        DatabaseView view = db.AsView();
+        ClipQuery<TestClip> query = view.Query(handle);
+        TrackInstance track = query.Tracks(new TimelineId(0))[0];
+
+        SumVisitor sumVisitor = default;
+        query.Sample(in track, 4, ref sumVisitor);
+        Assert.Equal(2.0f, sumVisitor.Sum, precision: 4);
+
+        Span<TimelineCursor> cursors = stackalloc TimelineCursor[1];
+        cursors[0] = new TimelineCursor(new TimelineId(0), 4, TimelineDirection.Forward);
+        FrameSink sink = default;
+        query.Visit(cursors, ref sink);
+        Assert.Equal(2.0f, sink.Sum, precision: 4);
+
+        Assert.Equal(sumVisitor.Sum, sink.Sum, precision: 4);
+    }
+
+    [Fact]
+    public void TrackDataExposesMode()
+    {
+        TimelineDatabase exclusive = BuildSingleTrack(
+            32,
+            TrackMode.Exclusive,
+            Clip.Range(10, 15, new TestClip(1)));
+        TimelineDatabase crossFade = BuildCrossFade();
+
+        ClipHandle<TestClip> exclusiveHandle = exclusive.Resolve(TestTypes.Clip);
+        DatabaseView exclusiveView = exclusive.AsView();
+        ClipQuery<TestClip> exclusiveQuery = exclusiveView.Query(exclusiveHandle);
+        TrackInstance exclusiveTrack = exclusiveQuery.Tracks(new TimelineId(0))[0];
+        Assert.Equal(TrackMode.Exclusive, exclusiveQuery.TrackData(in exclusiveTrack).Mode);
+
+        ClipHandle<TestClip> crossFadeHandle = crossFade.Resolve(TestTypes.Clip);
+        DatabaseView crossFadeView = crossFade.AsView();
+        ClipQuery<TestClip> crossFadeQuery = crossFadeView.Query(crossFadeHandle);
+        TrackInstance crossFadeTrack = crossFadeQuery.Tracks(new TimelineId(0))[0];
+        Assert.Equal(TrackMode.CrossFade, crossFadeQuery.TrackData(in crossFadeTrack).Mode);
+    }
+
+    [Fact]
+    public void TrackRefExposesMode()
+    {
+        TimelineDatabase exclusive = BuildSingleTrack(
+            32,
+            TrackMode.Exclusive,
+            Clip.Range(10, 15, new TestClip(1)));
+        TimelineDatabase crossFade = BuildCrossFade();
+
+        ClipHandle<TestClip> exclusiveHandle = exclusive.Resolve(TestTypes.Clip);
+        DatabaseView exclusiveView = exclusive.AsView();
+        ClipQuery<TestClip> exclusiveQuery = exclusiveView.Query(exclusiveHandle);
+        TrackInstance exclusiveTrack = exclusiveQuery.Tracks(new TimelineId(0))[0];
+        TrackRef exclusiveRef = exclusiveQuery.Track(in exclusiveTrack);
+        Assert.Equal(TrackMode.Exclusive, exclusiveRef.Mode);
+        Assert.Equal(0, exclusiveRef.Binding);
+
+        ClipHandle<TestClip> crossFadeHandle = crossFade.Resolve(TestTypes.Clip);
+        DatabaseView crossFadeView = crossFade.AsView();
+        ClipQuery<TestClip> crossFadeQuery = crossFadeView.Query(crossFadeHandle);
+        TrackInstance crossFadeTrack = crossFadeQuery.Tracks(new TimelineId(0))[0];
+        TrackRef crossFadeRef = crossFadeQuery.Track(in crossFadeTrack);
+        Assert.Equal(TrackMode.CrossFade, crossFadeRef.Mode);
+        Assert.Equal(0, crossFadeRef.Binding);
+    }
+
     private struct FrameSink : IClipFrameVisitor<TestClip>
     {
-        public int Sum;
+        public float Sum;
 
-        public void Visit(in ClipHit hit, in TestClip clip)
+        public void Visit(in TrackInstance track, in ClipHit hit, in TestClip clip)
         {
-            Sum += clip.Value;
+            Sum += clip.Value * hit.Weight;
+        }
+    }
+
+    private struct SumVisitor : IClipSampleVisitor<TestClip>
+    {
+        public float Sum;
+
+        public void Sample(in TrackInstance track, in TestClip clip, float weight)
+        {
+            Sum += clip.Value * weight;
         }
     }
 
@@ -256,6 +377,26 @@ public sealed class TimelineQueryTests
             new BindingId(0),
             mode,
             [clip]);
+        return builder.Build();
+    }
+
+    private static TimelineDatabase BuildCrossFade()
+    {
+        DatabaseBuilder builder = new();
+        TimelineId timeline = builder.AddTimeline(new TimelineKey(2), 20);
+        TestClip a = new(1);
+        TestClip b = new(2);
+
+        builder.AddTrack(
+            timeline,
+            TestTypes.Clip,
+            new BindingId(0),
+            TrackMode.CrossFade,
+            [
+                Clip.Range(0, 5, in a),
+                Clip.Range(3, 8, in b),
+            ]);
+
         return builder.Build();
     }
 

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Iutq.Core;
@@ -209,6 +210,23 @@ public readonly struct TrackData
     }
 }
 
+public readonly ref struct TrackRef
+{
+    public readonly ref readonly TrackInstance Instance;
+    public readonly ref readonly TrackData Data;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public TrackRef(in TrackInstance instance, in TrackData data)
+    {
+        Instance = ref instance;
+        Data = ref data;
+    }
+
+    public int Binding => Instance.Binding;
+    public int TrackDataId => Instance.TrackDataId;
+    public TrackMode Mode => Data.Mode;
+}
+
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct ClipHeader
 {
@@ -272,9 +290,21 @@ public readonly struct TypePartition
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
+public readonly struct ClipSample
+{
+    public readonly int DataOffset;
+    public readonly float Weight;
+
+    public ClipSample(int dataOffset, float weight)
+    {
+        DataOffset = dataOffset;
+        Weight = weight;
+    }
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct ClipHit
 {
-    public readonly int Binding;
     public readonly int Start;
     public readonly int End;
     public readonly int Tick;
@@ -286,7 +316,6 @@ public readonly struct ClipHit
     public readonly float BlendFactor;
 
     internal ClipHit(
-        int binding,
         int start,
         int end,
         int tick,
@@ -297,7 +326,6 @@ public readonly struct ClipHit
         float weight,
         float blendFactor)
     {
-        Binding = binding;
         Start = start;
         End = end;
         Tick = tick;
@@ -319,7 +347,6 @@ public readonly struct ClipHit
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct ClipTransition
 {
-    public readonly int Binding;
     public readonly long OccurrenceTick;
     public readonly int Tick;
     public readonly TimelineDirection Direction;
@@ -327,14 +354,12 @@ public readonly struct ClipTransition
     public readonly int DataOffset;
 
     internal ClipTransition(
-        int binding,
         long occurrenceTick,
         int tick,
         TimelineDirection direction,
         ClipPhase phase,
         int dataOffset)
     {
-        Binding = binding;
         OccurrenceTick = occurrenceTick;
         Tick = tick;
         Direction = direction;
@@ -346,7 +371,6 @@ public readonly struct ClipTransition
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct BlendTransition
 {
-    public readonly int Binding;
     public readonly long OccurrenceTick;
     public readonly int Tick;
     public readonly TimelineDirection Direction;
@@ -356,7 +380,6 @@ public readonly struct BlendTransition
     public readonly float Factor;
 
     internal BlendTransition(
-        int binding,
         long occurrenceTick,
         int tick,
         TimelineDirection direction,
@@ -365,7 +388,6 @@ public readonly struct BlendTransition
         int dataOffsetB,
         float factor)
     {
-        Binding = binding;
         OccurrenceTick = occurrenceTick;
         Tick = tick;
         Direction = direction;
