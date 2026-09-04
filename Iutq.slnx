@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/Iutq.Bench/Iutq.Bench.csproj" />
+  </Folder>
   <Folder Name="/examples/">
     <Project Path="examples/Iutq.Demo/Iutq.Demo.csproj" />
   </Folder>

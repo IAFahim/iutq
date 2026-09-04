@@ -1,0 +1,17 @@
+namespace Iutq.Core;
+
+internal static class Fnv1a64
+{
+    public static ulong Hash(ReadOnlySpan<byte> bytes)
+    {
+        ulong hash = 14695981039346656037UL;
+
+        foreach (byte value in bytes)
+        {
+            hash ^= value;
+            hash *= 1099511628211UL;
+        }
+
+        return hash;
+    }
+}
