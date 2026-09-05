@@ -1,11 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-  </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\Iutq.Core\Iutq.Core.csproj" />
-  </ItemGroup>
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+    </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="BenchmarkDotNet" Version="0.15.8"/>
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Iutq.Core\Iutq.Core.csproj"/>
+    </ItemGroup>
 </Project>

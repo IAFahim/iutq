@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <!-- Cached pinned-section pointers (AsView fast path) use pointer math. -->
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-  </PropertyGroup>
+    <PropertyGroup>
+        <!-- Cached pinned-section pointers (AsView fast path) use pointer math. -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
 </Project>

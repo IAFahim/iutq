@@ -21,7 +21,10 @@ public struct DamagePulseClip
 {
     public int Damage;
 
-    public DamagePulseClip(int damage) => Damage = damage;
+    public DamagePulseClip(int damage)
+    {
+        Damage = damage;
+    }
 }
 
 public static class GameClipTypes
@@ -66,10 +69,7 @@ public struct DamageTransitions : IClipTransitionVisitor<DamagePulseClip>
 
     public void Clip(in TrackInstance track, in ClipTransition transition, in DamagePulseClip clip)
     {
-        if (transition.Phase == ClipPhase.Enter)
-        {
-            Damage += clip.Damage;
-        }
+        if (transition.Phase == ClipPhase.Enter) Damage += clip.Damage;
     }
 
     public void Blend(
@@ -83,11 +83,11 @@ public struct DamageTransitions : IClipTransitionVisitor<DamagePulseClip>
 
 public sealed class TimelineRuntime
 {
-    public readonly TimelineDatabase Database;
-    public readonly TimelineId LightAttack;
-    public readonly TimelineId Dash;
-    public readonly ClipHandle<ForceClip> Force;
     public readonly ClipHandle<DamagePulseClip> DamagePulse;
+    public readonly TimelineId Dash;
+    public readonly TimelineDatabase Database;
+    public readonly ClipHandle<ForceClip> Force;
+    public readonly TimelineId LightAttack;
 
     private TimelineRuntime(
         TimelineDatabase database,
@@ -106,8 +106,8 @@ public sealed class TimelineRuntime
     public static TimelineRuntime Build()
     {
         DatabaseBuilder builder = new();
-        TimelineId lightAttack = builder.AddTimeline(GameTimelines.LightAttack, 30);
-        TimelineId dash = builder.AddTimeline(GameTimelines.Dash, 12);
+        var lightAttack = builder.AddTimeline(GameTimelines.LightAttack, 30);
+        var dash = builder.AddTimeline(GameTimelines.Dash, 12);
 
         ForceClip attackForce = new(14f, 2f);
         ForceClip attackRecovery = new(4f, 0f);
@@ -121,7 +121,7 @@ public sealed class TimelineRuntime
             TrackMode.CrossFade,
             [
                 Clip.Range(4, 10, in attackForce),
-                Clip.Range(8, 14, in attackRecovery),
+                Clip.Range(8, 14, in attackRecovery)
             ]);
 
         builder.AddTrack(
@@ -130,7 +130,7 @@ public sealed class TimelineRuntime
             new BindingId(0),
             TrackMode.Exclusive,
             [
-                Clip.At(7, in hit),
+                Clip.At(7, in hit)
             ]);
 
         builder.AddTrack(
@@ -139,10 +139,10 @@ public sealed class TimelineRuntime
             new BindingId(0),
             TrackMode.Exclusive,
             [
-                Clip.Range(0, 6, in dashForce),
+                Clip.Range(0, 6, in dashForce)
             ]);
 
-        TimelineDatabase database = builder.Build();
+        var database = builder.Build();
 
         return new TimelineRuntime(
             database,
@@ -161,18 +161,16 @@ public static class ForceSystem
         out float forward,
         out float up)
     {
-        DatabaseView db = runtime.Database.AsView();
-        ClipQuery<ForceClip> force = db.Query(runtime.Force);
+        var db = runtime.Database.AsView();
+        var force = db.Query(runtime.Force);
         int[] bindingEntity = [0];
         Span<ForceAccumulator> accumulators = stackalloc ForceAccumulator[1];
 
-        foreach (ref readonly TimelineCursor cursor in activeTimelines)
+        foreach (ref readonly var cursor in activeTimelines)
+        foreach (ref readonly var track in force.Tracks(cursor.Timeline))
         {
-            foreach (ref readonly TrackInstance track in force.Tracks(cursor.Timeline))
-            {
-                ref ForceAccumulator accumulator = ref accumulators[bindingEntity[track.Binding]];
-                force.Sample(in track, cursor.Tick, ref accumulator);
-            }
+            ref var accumulator = ref accumulators[bindingEntity[track.Binding]];
+            force.Sample(in track, cursor.Tick, ref accumulator);
         }
 
         forward = accumulators[0].Forward;
@@ -186,8 +184,8 @@ public static class DamageSystem
         TimelineRuntime runtime,
         in TimelineSpan movement)
     {
-        DatabaseView db = runtime.Database.AsView();
-        ClipQuery<DamagePulseClip> damage = db.Query(runtime.DamagePulse);
+        var db = runtime.Database.AsView();
+        var damage = db.Query(runtime.DamagePulse);
         DamageTransitions transitions = default;
 
         damage.TraverseTransitions(in movement, ref transitions);
@@ -199,20 +197,20 @@ public static class Program
 {
     public static void Main()
     {
-        TimelineRuntime runtime = TimelineRuntime.Build();
+        var runtime = TimelineRuntime.Build();
 
         Span<TimelineCursor> playerTimelines = stackalloc TimelineCursor[2];
         playerTimelines[0] = new TimelineCursor(runtime.LightAttack, 8, TimelineDirection.Forward);
         playerTimelines[1] = new TimelineCursor(runtime.Dash, 3, TimelineDirection.Forward);
 
-        ForceSystem.Execute(runtime, playerTimelines, out float entityForward, out float entityUp);
+        ForceSystem.Execute(runtime, playerTimelines, out var entityForward, out var entityUp);
 
-        DatabaseView db = runtime.Database.AsView();
-        ClipQuery<ForceClip> force = db.Query(runtime.Force);
+        var db = runtime.Database.AsView();
+        var force = db.Query(runtime.Force);
         TotalForceVisitor visitor = default;
         force.Visit(playerTimelines, ref visitor);
 
-        int damage = DamageSystem.CatchUp(
+        var damage = DamageSystem.CatchUp(
             runtime,
             new TimelineSpan(runtime.LightAttack, 6, 7));
 

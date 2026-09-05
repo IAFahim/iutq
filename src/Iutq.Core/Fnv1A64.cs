@@ -1,6 +1,6 @@
 namespace Iutq.Core;
 
-internal static class Fnv1a64
+internal static class Fnv1A64
 {
     public static ulong Hash(ReadOnlySpan<byte> bytes)
     {

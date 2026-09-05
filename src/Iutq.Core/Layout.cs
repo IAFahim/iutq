@@ -1,20 +1,22 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Iutq.Core;
 
 #pragma warning disable CA1711
+[Flags]
 public enum TimelineFlags : byte
 {
     None = 0,
-    Loop = 1,
+    Loop = 1
 }
 #pragma warning restore CA1711
 
 public enum TrackMode : byte
 {
     Exclusive = 0,
-    CrossFade = 1,
+    CrossFade = 1
 }
 
 public enum ClipEase : byte
@@ -22,14 +24,14 @@ public enum ClipEase : byte
     Linear = 0,
     QuadIn = 1,
     QuadOut = 2,
-    CubicInOut = 3,
+    CubicInOut = 3
 }
 
 public enum TimelineDirection : sbyte
 {
     Reverse = -1,
     None = 0,
-    Forward = 1,
+    Forward = 1
 }
 
 public enum ClipPhase : byte
@@ -37,7 +39,7 @@ public enum ClipPhase : byte
     None = 0,
     Enter = 1,
     Stay = 2,
-    Exit = 3,
+    Exit = 3
 }
 
 public enum BlendPhase : byte
@@ -45,7 +47,7 @@ public enum BlendPhase : byte
     None = 0,
     Enter = 1,
     Stay = 2,
-    Exit = 3,
+    Exit = 3
 }
 
 internal enum BoundaryKind : byte
@@ -55,7 +57,7 @@ internal enum BoundaryKind : byte
     ClipSingle = 2,
     BlendSingle = 3,
     BlendRight = 4,
-    ClipRight = 5,
+    ClipRight = 5
 }
 
 public readonly record struct TimelineKey(ulong Value);
@@ -65,7 +67,10 @@ public readonly struct TimelineId
 {
     public readonly int Value;
 
-    public TimelineId(int value) => Value = value;
+    public TimelineId(int value)
+    {
+        Value = value;
+    }
 
     public static readonly TimelineId None = new(-1);
 
@@ -77,11 +82,17 @@ public readonly struct BindingId
 {
     public readonly int Value;
 
-    public BindingId(int value) => Value = value;
+    public BindingId(int value)
+    {
+        Value = value;
+    }
 
     public static readonly BindingId None = new(-1);
 }
 
+[SuppressMessage("ReSharper", "UnusedTypeParameter",
+    Justification =
+        "Phantom type parameter: statically binds a clip type to its payload type with no runtime representation.")]
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 public readonly struct ClipType<T>
     where T : unmanaged
@@ -96,13 +107,19 @@ public readonly struct ClipType<T>
     }
 }
 
+[SuppressMessage("ReSharper", "UnusedTypeParameter",
+    Justification =
+        "Phantom type parameter: statically binds a handle to its payload type with no runtime representation.")]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct ClipHandle<T>
     where T : unmanaged
 {
     private readonly int _slotPlusOne;
 
-    internal ClipHandle(int typeSlot) => _slotPlusOne = checked(typeSlot + 1);
+    internal ClipHandle(int typeSlot)
+    {
+        _slotPlusOne = checked(typeSlot + 1);
+    }
 
     internal int TypeSlot => _slotPlusOne - 1;
 
@@ -140,7 +157,7 @@ public readonly struct TimelineSpan
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TimelineHeader
+public readonly struct TimelineHeader : IEquatable<TimelineHeader>
 {
     public readonly ulong Key;
     public readonly int Duration;
@@ -152,10 +169,35 @@ public readonly struct TimelineHeader
         Duration = duration;
         Flags = flags;
     }
+
+    public bool Equals(TimelineHeader other)
+    {
+        return Key == other.Key && Duration == other.Duration && Flags == other.Flags;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is TimelineHeader other && Equals(other);
+    }
+
+    public static bool operator ==(TimelineHeader left, TimelineHeader right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(TimelineHeader left, TimelineHeader right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(Key, Duration, Flags);
+    }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TimelineLookupEntry
+public readonly struct TimelineLookupEntry : IEquatable<TimelineLookupEntry>
 {
     public readonly ulong Key;
     public readonly int TimelineId;
@@ -165,10 +207,35 @@ public readonly struct TimelineLookupEntry
         Key = key;
         TimelineId = timelineId;
     }
+
+    public bool Equals(TimelineLookupEntry other)
+    {
+        return Key == other.Key && TimelineId == other.TimelineId;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is TimelineLookupEntry other && Equals(other);
+    }
+
+    public static bool operator ==(TimelineLookupEntry left, TimelineLookupEntry right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(TimelineLookupEntry left, TimelineLookupEntry right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(Key, TimelineId);
+    }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TrackInstance
+public readonly struct TrackInstance : IEquatable<TrackInstance>
 {
     public readonly int Binding;
     public readonly int TrackDataId;
@@ -178,10 +245,35 @@ public readonly struct TrackInstance
         Binding = binding;
         TrackDataId = trackDataId;
     }
+
+    public bool Equals(TrackInstance other)
+    {
+        return Binding == other.Binding && TrackDataId == other.TrackDataId;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is TrackInstance other && Equals(other);
+    }
+
+    public static bool operator ==(TrackInstance left, TrackInstance right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(TrackInstance left, TrackInstance right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(Binding, TrackDataId);
+    }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TrackData
+public readonly struct TrackData : IEquatable<TrackData>
 {
     public readonly ulong TypeKey;
     public readonly int ClipStart;
@@ -208,6 +300,37 @@ public readonly struct TrackData
         BoundaryCount = boundaryCount;
         Mode = mode;
     }
+
+    public bool Equals(TrackData other)
+    {
+        return TypeKey == other.TypeKey &&
+               ClipStart == other.ClipStart &&
+               ClipCount == other.ClipCount &&
+               LaneSplit == other.LaneSplit &&
+               BoundaryStart == other.BoundaryStart &&
+               BoundaryCount == other.BoundaryCount &&
+               Mode == other.Mode;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is TrackData other && Equals(other);
+    }
+
+    public static bool operator ==(TrackData left, TrackData right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(TrackData left, TrackData right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(TypeKey, ClipStart, ClipCount, LaneSplit, BoundaryStart, BoundaryCount, Mode);
+    }
 }
 
 public readonly ref struct TrackRef
@@ -228,7 +351,7 @@ public readonly ref struct TrackRef
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct ClipHeader
+public readonly struct ClipHeader : IEquatable<ClipHeader>
 {
     public readonly int Start;
     public readonly int End;
@@ -243,11 +366,36 @@ public readonly struct ClipHeader
         Ease = ease;
     }
 
+    public bool Equals(ClipHeader other)
+    {
+        return Start == other.Start && End == other.End && DataOffset == other.DataOffset && Ease == other.Ease;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is ClipHeader other && Equals(other);
+    }
+
+    public static bool operator ==(ClipHeader left, ClipHeader right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(ClipHeader left, ClipHeader right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(Start, End, DataOffset, Ease);
+    }
+
     public int Duration => End - Start;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-internal readonly struct BoundaryHeader
+internal readonly struct BoundaryHeader : IEquatable<BoundaryHeader>
 {
     public readonly int Tick;
     public readonly int ClipA;
@@ -261,10 +409,35 @@ internal readonly struct BoundaryHeader
         ClipB = clipB;
         Kind = kind;
     }
+
+    public bool Equals(BoundaryHeader other)
+    {
+        return Tick == other.Tick && ClipA == other.ClipA && ClipB == other.ClipB && Kind == other.Kind;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is BoundaryHeader other && Equals(other);
+    }
+
+    public static bool operator ==(BoundaryHeader left, BoundaryHeader right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(BoundaryHeader left, BoundaryHeader right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(Tick, ClipA, ClipB, Kind);
+    }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TypeDescriptor
+public readonly struct TypeDescriptor : IEquatable<TypeDescriptor>
 {
     public readonly ulong Key;
     public readonly int Size;
@@ -274,10 +447,35 @@ public readonly struct TypeDescriptor
         Key = key;
         Size = size;
     }
+
+    public bool Equals(TypeDescriptor other)
+    {
+        return Key == other.Key && Size == other.Size;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is TypeDescriptor other && Equals(other);
+    }
+
+    public static bool operator ==(TypeDescriptor left, TypeDescriptor right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(TypeDescriptor left, TypeDescriptor right)
+    {
+        return !left.Equals(right);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(Key, Size);
+    }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TypePartition
+public readonly struct TypePartition : IEquatable<TypePartition>
 {
     public readonly int TrackStart;
     public readonly int TrackCount;
@@ -286,6 +484,31 @@ public readonly struct TypePartition
     {
         TrackStart = trackStart;
         TrackCount = trackCount;
+    }
+
+    public bool Equals(TypePartition other)
+    {
+        return TrackStart == other.TrackStart && TrackCount == other.TrackCount;
+    }
+
+    public override bool Equals(object? obj)
+    {
+        return obj is TypePartition other && Equals(other);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(TrackStart, TrackCount);
+    }
+
+    public static bool operator ==(TypePartition left, TypePartition right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(TypePartition left, TypePartition right)
+    {
+        return !left.Equals(right);
     }
 }
 

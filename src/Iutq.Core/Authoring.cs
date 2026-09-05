@@ -14,12 +14,16 @@ public static class Clip
         int end,
         in TClip data,
         ClipEase ease = ClipEase.Linear)
-        where TClip : unmanaged =>
-        new(start, end, data, ease);
+        where TClip : unmanaged
+    {
+        return new ClipDefinition<TClip>(start, end, data, ease);
+    }
 
     public static ClipDefinition<TClip> At<TClip>(
         int tick,
         in TClip data)
-        where TClip : unmanaged =>
-        new(tick, checked(tick + 1), data, ClipEase.Linear);
+        where TClip : unmanaged
+    {
+        return new ClipDefinition<TClip>(tick, checked(tick + 1), data);
+    }
 }

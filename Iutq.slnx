@@ -1,14 +1,14 @@
 <Solution>
-  <Folder Name="/bench/">
-    <Project Path="bench/Iutq.Bench/Iutq.Bench.csproj" />
-  </Folder>
-  <Folder Name="/examples/">
-    <Project Path="examples/Iutq.Demo/Iutq.Demo.csproj" />
-  </Folder>
-  <Folder Name="/src/">
-    <Project Path="src/Iutq.Core/Iutq.Core.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/Iutq.Tests/Iutq.Tests.csproj" />
-  </Folder>
+    <Folder Name="/bench/">
+        <Project Path="bench/Iutq.Bench/Iutq.Bench.csproj"/>
+    </Folder>
+    <Folder Name="/examples/">
+        <Project Path="examples/Iutq.Demo/Iutq.Demo.csproj"/>
+    </Folder>
+    <Folder Name="/src/">
+        <Project Path="src/Iutq.Core/Iutq.Core.csproj"/>
+    </Folder>
+    <Folder Name="/tests/">
+        <Project Path="tests/Iutq.Tests/Iutq.Tests.csproj"/>
+    </Folder>
 </Solution>

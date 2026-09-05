@@ -4,49 +4,34 @@ using System.Runtime.InteropServices;
 namespace Iutq.Core;
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-internal readonly struct BlobHeader
+internal readonly struct BlobHeader(
+    uint magic,
+    ushort version,
+    ushort reserved,
+    int timelineCount,
+    int trackCount,
+    int trackDataCount,
+    int clipCount,
+    int boundaryCount,
+    int typeCount,
+    int arenaBytes,
+    ulong payloadHash)
 {
-    public readonly uint Magic;
-    public readonly ushort Version;
-    public readonly ushort Reserved;
-    public readonly int TimelineCount;
-    public readonly int TrackCount;
-    public readonly int TrackDataCount;
-    public readonly int ClipCount;
-    public readonly int BoundaryCount;
-    public readonly int TypeCount;
-    public readonly int ArenaBytes;
-    public readonly ulong PayloadHash;
-
-    public BlobHeader(
-        uint magic,
-        ushort version,
-        ushort reserved,
-        int timelineCount,
-        int trackCount,
-        int trackDataCount,
-        int clipCount,
-        int boundaryCount,
-        int typeCount,
-        int arenaBytes,
-        ulong payloadHash)
-    {
-        Magic = magic;
-        Version = version;
-        Reserved = reserved;
-        TimelineCount = timelineCount;
-        TrackCount = trackCount;
-        TrackDataCount = trackDataCount;
-        ClipCount = clipCount;
-        BoundaryCount = boundaryCount;
-        TypeCount = typeCount;
-        ArenaBytes = arenaBytes;
-        PayloadHash = payloadHash;
-    }
+    public readonly uint Magic = magic;
+    public readonly ushort Version = version;
+    public readonly ushort Reserved = reserved;
+    public readonly int TimelineCount = timelineCount;
+    public readonly int TrackCount = trackCount;
+    public readonly int TrackDataCount = trackDataCount;
+    public readonly int ClipCount = clipCount;
+    public readonly int BoundaryCount = boundaryCount;
+    public readonly int TypeCount = typeCount;
+    public readonly int ArenaBytes = arenaBytes;
+    public readonly ulong PayloadHash = payloadHash;
 }
 
 [StructLayout(LayoutKind.Sequential)]
-internal unsafe readonly struct CachedSections
+internal readonly unsafe struct CachedSections
 {
     private readonly nint _timelines;
     private readonly int _timelineCount;
@@ -120,8 +105,8 @@ internal unsafe readonly struct CachedSections
     internal static CachedSections Compute(byte[] blob)
     {
         ReadOnlySpan<byte> span = blob;
-        BlobHeader header = MemoryMarshal.Read<BlobHeader>(span);
-        SectionLayout layout = SectionLayout.Compute(
+        var header = MemoryMarshal.Read<BlobHeader>(span);
+        var layout = SectionLayout.Compute(
             header.TimelineCount,
             header.TrackCount,
             header.TrackDataCount,
@@ -138,14 +123,16 @@ internal unsafe readonly struct CachedSections
             SectionPtr<ClipHeader>(span, layout.Clips, header.ClipCount), header.ClipCount,
             SectionPtr<BoundaryHeader>(span, layout.Boundaries, header.BoundaryCount), header.BoundaryCount,
             SectionPtr<TypeDescriptor>(span, layout.Types, header.TypeCount), header.TypeCount,
-            SectionPtr<TypePartition>(span, layout.Directory, checked(header.TimelineCount * header.TypeCount)), checked(header.TimelineCount * header.TypeCount),
+            SectionPtr<TypePartition>(span, layout.Directory, checked(header.TimelineCount * header.TypeCount)),
+            checked(header.TimelineCount * header.TypeCount),
             SectionPtr<byte>(span, layout.Arena, header.ArenaBytes), header.ArenaBytes);
     }
 
-    private static nint SectionPtr<T>(ReadOnlySpan<byte> blob, int offset, int count)
-        where T : unmanaged =>
-        (nint)Unsafe.AsPointer(ref MemoryMarshal.GetReference(
+    private static nint SectionPtr<T>(ReadOnlySpan<byte> blob, int offset, int count) where T : unmanaged
+    {
+        return (nint)Unsafe.AsPointer(ref MemoryMarshal.GetReference(
             MemoryMarshal.Cast<byte, T>(blob.Slice(offset, checked(count * Unsafe.SizeOf<T>())))));
+    }
 }
 
 internal readonly record struct SectionLayout(
@@ -170,16 +157,16 @@ internal readonly record struct SectionLayout(
         int typeCount,
         int arenaBytes)
     {
-        int offset = Unsafe.SizeOf<BlobHeader>();
-        int timelines = Advance<TimelineHeader>(ref offset, timelineCount);
-        int lookup = Advance<TimelineLookupEntry>(ref offset, timelineCount);
-        int tracks = Advance<TrackInstance>(ref offset, trackCount);
-        int trackData = Advance<TrackData>(ref offset, trackDataCount);
-        int clips = Advance<ClipHeader>(ref offset, clipCount);
-        int boundaries = Advance<BoundaryHeader>(ref offset, boundaryCount);
-        int types = Advance<TypeDescriptor>(ref offset, typeCount);
-        int directory = Advance<TypePartition>(ref offset, checked(timelineCount * typeCount));
-        int arena = AdvanceBytes(ref offset, arenaBytes);
+        var offset = Unsafe.SizeOf<BlobHeader>();
+        var timelines = Advance<TimelineHeader>(ref offset, timelineCount);
+        var lookup = Advance<TimelineLookupEntry>(ref offset, timelineCount);
+        var tracks = Advance<TrackInstance>(ref offset, trackCount);
+        var trackData = Advance<TrackData>(ref offset, trackDataCount);
+        var clips = Advance<ClipHeader>(ref offset, clipCount);
+        var boundaries = Advance<BoundaryHeader>(ref offset, boundaryCount);
+        var types = Advance<TypeDescriptor>(ref offset, typeCount);
+        var directory = Advance<TypePartition>(ref offset, checked(timelineCount * typeCount));
+        var arena = AdvanceBytes(ref offset, arenaBytes);
 
         return new SectionLayout(
             timelines,
@@ -195,13 +182,15 @@ internal readonly record struct SectionLayout(
     }
 
     private static int Advance<T>(ref int offset, int count)
-        where T : unmanaged =>
-        AdvanceBytes(ref offset, checked(count * Unsafe.SizeOf<T>()));
+        where T : unmanaged
+    {
+        return AdvanceBytes(ref offset, checked(count * Unsafe.SizeOf<T>()));
+    }
 
     private static int AdvanceBytes(ref int offset, int bytes)
     {
         offset = checked((offset + 7) & ~7);
-        int start = offset;
+        var start = offset;
         offset = checked(offset + bytes);
         return start;
     }
@@ -217,7 +206,7 @@ public sealed class TimelineDatabase
 
     private TimelineDatabase(byte[] blob)
     {
-        byte[] pinned = GC.AllocateUninitializedArray<byte>(blob.Length, pinned: true);
+        var pinned = GC.AllocateUninitializedArray<byte>(blob.Length, true);
         blob.AsSpan().CopyTo(pinned);
         _blob = pinned;
         _sections = CachedSections.Compute(pinned);
@@ -225,49 +214,48 @@ public sealed class TimelineDatabase
 
     public static TimelineDatabase Load(ReadOnlySpan<byte> blob)
     {
-        byte[] owned = blob.ToArray();
+        var owned = blob.ToArray();
 
-        if (!TryValidateBlob(owned, out BlobError error))
-        {
-            throw new InvalidDataException(DescribeError(error));
-        }
+        if (!TryValidateBlob(owned, out var error)) throw new InvalidDataException(DescribeError(error));
 
         return new TimelineDatabase(owned);
     }
 
     internal static TimelineDatabase Create(byte[] blob)
     {
-        if (!TryValidateBlob(blob, out BlobError error))
-        {
+        if (!TryValidateBlob(blob, out var error))
             throw new InvalidOperationException($"Builder produced an invalid iutq database. {DescribeError(error)}");
-        }
 
         return new TimelineDatabase(blob);
     }
 
-    public byte[] ToArray() => (byte[])_blob.Clone();
+    public byte[] ToArray()
+    {
+        return (byte[])_blob.Clone();
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public DatabaseView AsView() => new(
-        _sections.Timelines,
-        _sections.TimelineLookup,
-        _sections.Tracks,
-        _sections.TrackData,
-        _sections.Clips,
-        _sections.Boundaries,
-        _sections.Types,
-        _sections.Directory,
-        _sections.Arena);
+    public DatabaseView AsView()
+    {
+        return new DatabaseView(
+            _sections.Timelines,
+            _sections.TimelineLookup,
+            _sections.Tracks,
+            _sections.TrackData,
+            _sections.Clips,
+            _sections.Boundaries,
+            _sections.Types,
+            _sections.Directory,
+            _sections.Arena);
+    }
 
     public ClipHandle<TClip> Resolve<TClip>(ClipType<TClip> type)
         where TClip : unmanaged
     {
-        DatabaseView view = AsView();
+        var view = AsView();
 
-        if (!view.TryResolve(type, out ClipHandle<TClip> handle))
-        {
+        if (!view.TryResolve(type, out var handle))
             throw new KeyNotFoundException($"Timeline clip type 0x{type.Key:X16} is not present in this database.");
-        }
 
         return handle;
     }
@@ -283,7 +271,7 @@ public sealed class TimelineDatabase
         TypePartition[] directory,
         byte[] arena)
     {
-        SectionLayout layout = SectionLayout.Compute(
+        var layout = SectionLayout.Compute(
             timelines.Length,
             tracks.Length,
             trackData.Length,
@@ -292,7 +280,7 @@ public sealed class TimelineDatabase
             types.Length,
             arena.Length);
 
-        byte[] blob = new byte[layout.TotalBytes];
+        var blob = new byte[layout.TotalBytes];
 
         BlobHeader initial = new(
             Magic,
@@ -318,7 +306,7 @@ public sealed class TimelineDatabase
         WriteSection(blob, layout.Directory, directory);
         arena.CopyTo(blob, layout.Arena);
 
-        ulong hash = Fnv1a64.Hash(blob.AsSpan(Unsafe.SizeOf<BlobHeader>()));
+        var hash = Fnv1A64.Hash(blob.AsSpan(Unsafe.SizeOf<BlobHeader>()));
         BlobHeader final = new(
             Magic,
             Version,
@@ -343,8 +331,9 @@ public sealed class TimelineDatabase
             blob.AsSpan(offset, checked(values.Length * Unsafe.SizeOf<T>()))));
     }
 
-    private static SectionLayout ComputeLayout(in BlobHeader header) =>
-        SectionLayout.Compute(
+    private static SectionLayout ComputeLayout(in BlobHeader header)
+    {
+        return SectionLayout.Compute(
             header.TimelineCount,
             header.TrackCount,
             header.TrackDataCount,
@@ -352,26 +341,20 @@ public sealed class TimelineDatabase
             header.BoundaryCount,
             header.TypeCount,
             header.ArenaBytes);
-
-    internal enum BlobError
-    {
-        None = 0,
-        Truncated,
-        Header,
-        Length,
-        Hash,
-        Structure,
     }
 
-    private static string DescribeError(BlobError error) => error switch
+    private static string DescribeError(BlobError error)
     {
-        BlobError.Truncated => "iutq blob rejected: IUTQ1001: blob is smaller than the fixed header.",
-        BlobError.Header => "iutq blob rejected: IUTQ1002: bad magic, version or negative section counts.",
-        BlobError.Length => "iutq blob rejected: IUTQ1003: section layout total does not match the blob length.",
-        BlobError.Hash => "iutq blob rejected: IUTQ1004: payload hash mismatch (corrupt or truncated body).",
-        BlobError.Structure => "iutq blob rejected: IUTQ1005: structural validation failed.",
-        _ => "iutq blob rejected: IUTQ1000: unknown error.",
-    };
+        return error switch
+        {
+            BlobError.Truncated => "iutq blob rejected: IUTQ1001: blob is smaller than the fixed header.",
+            BlobError.Header => "iutq blob rejected: IUTQ1002: bad magic, version or negative section counts.",
+            BlobError.Length => "iutq blob rejected: IUTQ1003: section layout total does not match the blob length.",
+            BlobError.Hash => "iutq blob rejected: IUTQ1004: payload hash mismatch (corrupt or truncated body).",
+            BlobError.Structure => "iutq blob rejected: IUTQ1005: structural validation failed.",
+            _ => "iutq blob rejected: IUTQ1000: unknown error."
+        };
+    }
 
     private static bool TryValidateBlob(byte[] blob, out BlobError error)
     {
@@ -385,7 +368,7 @@ public sealed class TimelineDatabase
                 return false;
             }
 
-            BlobHeader header = MemoryMarshal.Read<BlobHeader>(span);
+            var header = MemoryMarshal.Read<BlobHeader>(span);
 
             if (header.Magic != Magic ||
                 header.Version != Version ||
@@ -401,7 +384,7 @@ public sealed class TimelineDatabase
                 return false;
             }
 
-            SectionLayout layout = ComputeLayout(in header);
+            var layout = ComputeLayout(in header);
 
             if (layout.TotalBytes != span.Length)
             {
@@ -409,7 +392,7 @@ public sealed class TimelineDatabase
                 return false;
             }
 
-            if (Fnv1a64.Hash(span[Unsafe.SizeOf<BlobHeader>()..]) != header.PayloadHash)
+            if (Fnv1A64.Hash(span[Unsafe.SizeOf<BlobHeader>()..]) != header.PayloadHash)
             {
                 error = BlobError.Hash;
                 return false;
@@ -446,51 +429,44 @@ public sealed class TimelineDatabase
         in BlobHeader header,
         SectionLayout layout)
     {
-        ReadOnlySpan<TimelineHeader> timelines = MemoryMarshal.Cast<byte, TimelineHeader>(
+        var timelines = MemoryMarshal.Cast<byte, TimelineHeader>(
             blob.Slice(layout.Timelines, checked(header.TimelineCount * Unsafe.SizeOf<TimelineHeader>())));
-        ReadOnlySpan<TimelineLookupEntry> lookup = MemoryMarshal.Cast<byte, TimelineLookupEntry>(
+        var lookup = MemoryMarshal.Cast<byte, TimelineLookupEntry>(
             blob.Slice(layout.Lookup, checked(header.TimelineCount * Unsafe.SizeOf<TimelineLookupEntry>())));
-        ReadOnlySpan<TrackInstance> tracks = MemoryMarshal.Cast<byte, TrackInstance>(
+        var tracks = MemoryMarshal.Cast<byte, TrackInstance>(
             blob.Slice(layout.Tracks, checked(header.TrackCount * Unsafe.SizeOf<TrackInstance>())));
-        ReadOnlySpan<TrackData> trackData = MemoryMarshal.Cast<byte, TrackData>(
+        var trackData = MemoryMarshal.Cast<byte, TrackData>(
             blob.Slice(layout.TrackData, checked(header.TrackDataCount * Unsafe.SizeOf<TrackData>())));
-        ReadOnlySpan<ClipHeader> clips = MemoryMarshal.Cast<byte, ClipHeader>(
+        var clips = MemoryMarshal.Cast<byte, ClipHeader>(
             blob.Slice(layout.Clips, checked(header.ClipCount * Unsafe.SizeOf<ClipHeader>())));
-        ReadOnlySpan<BoundaryHeader> boundaries = MemoryMarshal.Cast<byte, BoundaryHeader>(
+        var boundaries = MemoryMarshal.Cast<byte, BoundaryHeader>(
             blob.Slice(layout.Boundaries, checked(header.BoundaryCount * Unsafe.SizeOf<BoundaryHeader>())));
-        ReadOnlySpan<TypeDescriptor> types = MemoryMarshal.Cast<byte, TypeDescriptor>(
+        var types = MemoryMarshal.Cast<byte, TypeDescriptor>(
             blob.Slice(layout.Types, checked(header.TypeCount * Unsafe.SizeOf<TypeDescriptor>())));
-        ReadOnlySpan<TypePartition> directory = MemoryMarshal.Cast<byte, TypePartition>(
-            blob.Slice(layout.Directory, checked(checked(header.TimelineCount * header.TypeCount) * Unsafe.SizeOf<TypePartition>())));
-        ReadOnlySpan<byte> arena = blob.Slice(layout.Arena, header.ArenaBytes);
+        var directory = MemoryMarshal.Cast<byte, TypePartition>(
+            blob.Slice(layout.Directory,
+                checked(checked(header.TimelineCount * header.TypeCount) * Unsafe.SizeOf<TypePartition>())));
+        var arena = blob.Slice(layout.Arena, header.ArenaBytes);
 
-        if (!ValidateTypes(types) || !ValidateTimelines(timelines) || !ValidateLookup(timelines, lookup))
+        if (!ValidateTypes(types) || !ValidateTimelines(timelines) || !ValidateLookup(timelines, lookup)) return false;
+
+        var maxEnds = new int[trackData.Length];
+
+        for (var i = 0; i < trackData.Length; i++)
         {
-            return false;
-        }
-
-        int[] maxEnds = new int[trackData.Length];
-
-        for (int i = 0; i < trackData.Length; i++)
-        {
-            ref readonly TrackData data = ref trackData[i];
+            ref readonly var data = ref trackData[i];
 
             if ((data.Mode != TrackMode.Exclusive && data.Mode != TrackMode.CrossFade) ||
                 !RangeWithin(data.ClipStart, data.ClipCount, clips.Length) ||
                 !RangeWithin(data.BoundaryStart, data.BoundaryCount, boundaries.Length) ||
                 data.LaneSplit < 0 ||
                 data.LaneSplit > data.ClipCount ||
-                !TryFindType(types, data.TypeKey, out int typeSlot))
-            {
+                !TryFindType(types, data.TypeKey, out var typeSlot))
                 return false;
-            }
 
-            if (data.Mode == TrackMode.Exclusive && data.LaneSplit != data.ClipCount)
-            {
-                return false;
-            }
+            if (data.Mode == TrackMode.Exclusive && data.LaneSplit != data.ClipCount) return false;
 
-            ReadOnlySpan<ClipHeader> window = clips.Slice(data.ClipStart, data.ClipCount);
+            var window = clips.Slice(data.ClipStart, data.ClipCount);
 
             if (!ValidateLane(window[..data.LaneSplit], types[typeSlot].Size, arena.Length) ||
                 !ValidateLane(window[data.LaneSplit..], types[typeSlot].Size, arena.Length) ||
@@ -499,58 +475,40 @@ public sealed class TimelineDatabase
                     window,
                     data.LaneSplit,
                     data.Mode))
-            {
                 return false;
-            }
 
             maxEnds[i] = ComputeMaxEnd(window);
         }
 
-        int trackCursor = 0;
+        var trackCursor = 0;
 
-        for (int typeSlot = 0; typeSlot < types.Length; typeSlot++)
+        for (var typeSlot = 0; typeSlot < types.Length; typeSlot++)
+        for (var timelineId = 0; timelineId < timelines.Length; timelineId++)
         {
-            for (int timelineId = 0; timelineId < timelines.Length; timelineId++)
+            ref readonly var partition = ref directory[typeSlot * timelines.Length + timelineId];
+
+            if (!RangeWithin(partition.TrackStart, partition.TrackCount, tracks.Length)) return false;
+
+            if (partition.TrackCount == 0) continue;
+
+            if (partition.TrackStart != trackCursor) return false;
+
+            for (var trackIndex = partition.TrackStart;
+                 trackIndex < partition.TrackStart + partition.TrackCount;
+                 trackIndex++)
             {
-                ref readonly TypePartition partition = ref directory[typeSlot * timelines.Length + timelineId];
+                ref readonly var instance = ref tracks[trackIndex];
 
-                if (!RangeWithin(partition.TrackStart, partition.TrackCount, tracks.Length))
-                {
+                if ((uint)instance.TrackDataId >= (uint)trackData.Length) return false;
+
+                ref readonly var data = ref trackData[instance.TrackDataId];
+
+                if (data.TypeKey != types[typeSlot].Key ||
+                    maxEnds[instance.TrackDataId] > timelines[timelineId].Duration)
                     return false;
-                }
-
-                if (partition.TrackCount == 0)
-                {
-                    continue;
-                }
-
-                if (partition.TrackStart != trackCursor)
-                {
-                    return false;
-                }
-
-                for (int trackIndex = partition.TrackStart;
-                     trackIndex < partition.TrackStart + partition.TrackCount;
-                     trackIndex++)
-                {
-                    ref readonly TrackInstance instance = ref tracks[trackIndex];
-
-                    if ((uint)instance.TrackDataId >= (uint)trackData.Length)
-                    {
-                        return false;
-                    }
-
-                    ref readonly TrackData data = ref trackData[instance.TrackDataId];
-
-                    if (data.TypeKey != types[typeSlot].Key ||
-                        maxEnds[instance.TrackDataId] > timelines[timelineId].Duration)
-                    {
-                        return false;
-                    }
-                }
-
-                trackCursor += partition.TrackCount;
             }
+
+            trackCursor += partition.TrackCount;
         }
 
         return trackCursor == tracks.Length;
@@ -560,16 +518,14 @@ public sealed class TimelineDatabase
     {
         ulong previous = 0;
 
-        for (int i = 0; i < types.Length; i++)
+        for (var i = 0; i < types.Length; i++)
         {
-            ref readonly TypeDescriptor type = ref types[i];
+            ref readonly var type = ref types[i];
 
             if (type.Key == 0 ||
                 type.Size <= 0 ||
                 (i > 0 && type.Key <= previous))
-            {
                 return false;
-            }
 
             previous = type.Key;
         }
@@ -579,15 +535,11 @@ public sealed class TimelineDatabase
 
     private static bool ValidateTimelines(ReadOnlySpan<TimelineHeader> timelines)
     {
-        foreach (ref readonly TimelineHeader timeline in timelines)
-        {
+        foreach (ref readonly var timeline in timelines)
             if (timeline.Key == 0 ||
                 timeline.Duration <= 0 ||
                 ((byte)timeline.Flags & ~(byte)TimelineFlags.Loop) != 0)
-            {
                 return false;
-            }
-        }
 
         return true;
     }
@@ -598,16 +550,14 @@ public sealed class TimelineDatabase
     {
         ulong previous = 0;
 
-        for (int i = 0; i < lookup.Length; i++)
+        for (var i = 0; i < lookup.Length; i++)
         {
-            ref readonly TimelineLookupEntry entry = ref lookup[i];
+            ref readonly var entry = ref lookup[i];
 
             if ((uint)entry.TimelineId >= (uint)timelines.Length ||
                 timelines[entry.TimelineId].Key != entry.Key ||
                 (i > 0 && entry.Key <= previous))
-            {
                 return false;
-            }
 
             previous = entry.Key;
         }
@@ -620,10 +570,10 @@ public sealed class TimelineDatabase
         int payloadSize,
         int arenaLength)
     {
-        int previousStart = -1;
-        int previousEnd = 0;
+        var previousStart = -1;
+        var previousEnd = 0;
 
-        foreach (ref readonly ClipHeader clip in clips)
+        foreach (ref readonly var clip in clips)
         {
             if (clip.Start < 0 ||
                 clip.End <= clip.Start ||
@@ -632,9 +582,7 @@ public sealed class TimelineDatabase
                 clip.DataOffset < 0 ||
                 clip.DataOffset > arenaLength - payloadSize ||
                 (byte)clip.Ease > (byte)ClipEase.CubicInOut)
-            {
                 return false;
-            }
 
             previousStart = clip.Start;
             previousEnd = clip.End;
@@ -651,9 +599,9 @@ public sealed class TimelineDatabase
     {
         List<BoundaryHeader> expected = [];
 
-        for (int i = 0; i < clips.Length; i++)
+        for (var i = 0; i < clips.Length; i++)
         {
-            ref readonly ClipHeader clip = ref clips[i];
+            ref readonly var clip = ref clips[i];
 
             if (clip.Duration == 1)
             {
@@ -668,15 +616,15 @@ public sealed class TimelineDatabase
 
         if (mode == TrackMode.CrossFade && laneSplit < clips.Length)
         {
-            int a = 0;
-            int b = laneSplit;
+            var a = 0;
+            var b = laneSplit;
 
             while (a < laneSplit && b < clips.Length)
             {
-                ref readonly ClipHeader clipA = ref clips[a];
-                ref readonly ClipHeader clipB = ref clips[b];
-                int overlapStart = Math.Max(clipA.Start, clipB.Start);
-                int overlapEnd = Math.Min(clipA.End, clipB.End);
+                ref readonly var clipA = ref clips[a];
+                ref readonly var clipB = ref clips[b];
+                var overlapStart = Math.Max(clipA.Start, clipB.Start);
+                var overlapEnd = Math.Min(clipA.End, clipB.End);
 
                 if (overlapStart < overlapEnd)
                 {
@@ -704,45 +652,36 @@ public sealed class TimelineDatabase
                 }
 
                 if (clipA.End <= clipB.End)
-                {
                     a++;
-                }
                 else
-                {
                     b++;
-                }
             }
         }
 
         expected.Sort(static (a, b) =>
         {
-            int tick = a.Tick.CompareTo(b.Tick);
+            var tick = a.Tick.CompareTo(b.Tick);
             if (tick != 0) return tick;
 
-            int kind = a.Kind.CompareTo(b.Kind);
+            var kind = a.Kind.CompareTo(b.Kind);
             if (kind != 0) return kind;
 
-            int clipA = a.ClipA.CompareTo(b.ClipA);
+            var clipA = a.ClipA.CompareTo(b.ClipA);
             return clipA != 0 ? clipA : a.ClipB.CompareTo(b.ClipB);
         });
 
-        if (expected.Count != actual.Length)
-        {
-            return false;
-        }
+        if (expected.Count != actual.Length) return false;
 
-        for (int i = 0; i < actual.Length; i++)
+        for (var i = 0; i < actual.Length; i++)
         {
-            ref readonly BoundaryHeader value = ref actual[i];
-            BoundaryHeader required = expected[i];
+            ref readonly var value = ref actual[i];
+            var required = expected[i];
 
             if (value.Tick != required.Tick ||
                 value.ClipA != required.ClipA ||
                 value.ClipB != required.ClipB ||
                 value.Kind != required.Kind)
-            {
                 return false;
-            }
         }
 
         return true;
@@ -750,25 +689,22 @@ public sealed class TimelineDatabase
 
     private static int ComputeMaxEnd(ReadOnlySpan<ClipHeader> clips)
     {
-        int max = 0;
+        var max = 0;
 
-        foreach (ref readonly ClipHeader clip in clips)
-        {
-            max = Math.Max(max, clip.End);
-        }
+        foreach (ref readonly var clip in clips) max = Math.Max(max, clip.End);
 
         return max;
     }
 
     private static bool TryFindType(ReadOnlySpan<TypeDescriptor> types, ulong key, out int slot)
     {
-        int lo = 0;
-        int hi = types.Length - 1;
+        var lo = 0;
+        var hi = types.Length - 1;
 
         while (lo <= hi)
         {
-            int mid = (lo + hi) >>> 1;
-            ulong candidate = types[mid].Key;
+            var mid = (lo + hi) >>> 1;
+            var candidate = types[mid].Key;
 
             if (key < candidate)
             {
@@ -789,11 +725,23 @@ public sealed class TimelineDatabase
         return false;
     }
 
-    private static bool RangeWithin(int start, int count, int length) =>
-        start >= 0 &&
-        count >= 0 &&
-        start <= length &&
-        count <= length - start;
+    private static bool RangeWithin(int start, int count, int length)
+    {
+        return start >= 0 &&
+               count >= 0 &&
+               start <= length &&
+               count <= length - start;
+    }
+
+    internal enum BlobError
+    {
+        None = 0,
+        Truncated,
+        Header,
+        Length,
+        Hash,
+        Structure
+    }
 }
 
 public readonly ref struct DatabaseView
@@ -833,13 +781,13 @@ public readonly ref struct DatabaseView
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryResolve(TimelineKey key, out TimelineId timelineId)
     {
-        int lo = 0;
-        int hi = TimelineLookup.Length - 1;
+        var lo = 0;
+        var hi = TimelineLookup.Length - 1;
 
         while (lo <= hi)
         {
-            int mid = (lo + hi) >>> 1;
-            ref readonly TimelineLookupEntry entry = ref TimelineLookup[mid];
+            var mid = (lo + hi) >>> 1;
+            ref readonly var entry = ref TimelineLookup[mid];
 
             if (key.Value < entry.Key)
             {
@@ -864,13 +812,13 @@ public readonly ref struct DatabaseView
     public bool TryResolve<TClip>(ClipType<TClip> type, out ClipHandle<TClip> handle)
         where TClip : unmanaged
     {
-        int lo = 0;
-        int hi = Types.Length - 1;
+        var lo = 0;
+        var hi = Types.Length - 1;
 
         while (lo <= hi)
         {
-            int mid = (lo + hi) >>> 1;
-            ref readonly TypeDescriptor descriptor = ref Types[mid];
+            var mid = (lo + hi) >>> 1;
+            ref readonly var descriptor = ref Types[mid];
 
             if (type.Key < descriptor.Key)
             {
@@ -900,9 +848,7 @@ public readonly ref struct DatabaseView
         where TClip : unmanaged
     {
         if (!handle.IsValid || (uint)handle.TypeSlot >= (uint)Types.Length)
-        {
             throw new ArgumentOutOfRangeException(nameof(handle));
-        }
 
         return new ClipQuery<TClip>(this, handle.TypeSlot);
     }
@@ -924,7 +870,7 @@ public readonly ref struct DatabaseView
     internal ref readonly T Payload<T>(int dataOffset)
         where T : unmanaged
     {
-        ref byte arena = ref MemoryMarshal.GetReference(Arena);
+        ref var arena = ref MemoryMarshal.GetReference(Arena);
         return ref Unsafe.As<byte, T>(ref Unsafe.Add(ref arena, dataOffset));
     }
 }

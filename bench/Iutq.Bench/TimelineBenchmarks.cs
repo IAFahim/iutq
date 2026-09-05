@@ -48,9 +48,15 @@ public struct TransitionCounter : IClipTransitionVisitor<BenchClip>
 {
     public int Count;
 
-    public void Clip(in TrackInstance track, in ClipTransition transition, in BenchClip clip) => Count++;
+    public void Clip(in TrackInstance track, in ClipTransition transition, in BenchClip clip)
+    {
+        Count++;
+    }
 
-    public void Blend(in TrackInstance track, in BlendTransition transition, in BenchClip clipA, in BenchClip clipB) => Count++;
+    public void Blend(in TrackInstance track, in BlendTransition transition, in BenchClip clipA, in BenchClip clipB)
+    {
+        Count++;
+    }
 }
 
 public sealed class TimelineConfig : ManualConfig
@@ -69,17 +75,17 @@ public sealed class TimelineConfig : ManualConfig
 [MemoryDiagnoser]
 public class TimelineBenchmarks
 {
-    private TimelineDatabase _dbExclusive = null!;
-    private TimelineDatabase _dbCrossFade = null!;
-    private TimelineDatabase _dbPulse = null!;
-    private ClipHandle<BenchClip> _handleExclusive;
-    private ClipHandle<BenchClip> _handleCrossFade;
-    private ClipHandle<BenchClip> _handlePulse;
-    private TimelineId[] _timelineIds = null!;
     private TimelineId _crossFadeTimeline;
+    private TimelineDatabase _dbCrossFade = null!;
+    private TimelineDatabase _dbExclusive = null!;
+    private TimelineDatabase _dbPulse = null!;
+    private TimelineCursor[] _eightCursors = null!;
+    private ClipHandle<BenchClip> _handleCrossFade;
+    private ClipHandle<BenchClip> _handleExclusive;
+    private ClipHandle<BenchClip> _handlePulse;
     private TimelineId _pulseTimeline;
     private TimelineCursor[] _singleCursor = null!;
-    private TimelineCursor[] _eightCursors = null!;
+    private TimelineId[] _timelineIds = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -87,16 +93,14 @@ public class TimelineBenchmarks
         DatabaseBuilder exclusiveBuilder = new();
         _timelineIds = new TimelineId[8];
 
-        for (int i = 0; i < 8; i++)
+        for (var i = 0; i < 8; i++)
         {
-            TimelineId timeline = exclusiveBuilder.AddTimeline(new TimelineKey(0xA100UL + (ulong)i), 64);
+            var timeline = exclusiveBuilder.AddTimeline(new TimelineKey(0xA100UL + (ulong)i), 64);
             _timelineIds[i] = timeline;
-            ClipDefinition<BenchClip>[] clips = new ClipDefinition<BenchClip>[4];
+            var clips = new ClipDefinition<BenchClip>[4];
 
-            for (int c = 0; c < 4; c++)
-            {
+            for (var c = 0; c < 4; c++)
                 clips[c] = Clip.Range(c * 16, c * 16 + 16, new BenchClip { A = 10f * i + c, B = 0.5f * c });
-            }
 
             exclusiveBuilder.AddTrack(timeline, BenchTypes.Clip, new BindingId(i), TrackMode.Exclusive, clips);
         }
@@ -110,9 +114,10 @@ public class TimelineBenchmarks
         [
             Clip.Range(0, 24, new BenchClip { A = 1f, B = 0.1f }),
             Clip.Range(16, 48, new BenchClip { A = 2f, B = 0.2f }),
-            Clip.Range(40, 64, new BenchClip { A = 3f, B = 0.3f }),
+            Clip.Range(40, 64, new BenchClip { A = 3f, B = 0.3f })
         ];
-        crossFadeBuilder.AddTrack(_crossFadeTimeline, BenchTypes.Clip, new BindingId(0), TrackMode.CrossFade, crossFadeClips);
+        crossFadeBuilder.AddTrack(_crossFadeTimeline, BenchTypes.Clip, new BindingId(0), TrackMode.CrossFade,
+            crossFadeClips);
         _dbCrossFade = crossFadeBuilder.Build();
         _handleCrossFade = _dbCrossFade.Resolve(BenchTypes.Clip);
 
@@ -123,7 +128,7 @@ public class TimelineBenchmarks
             Clip.At(5, new BenchClip { A = 5f, B = 0.5f }),
             Clip.Range(8, 20, new BenchClip { A = 8f, B = 0.8f }),
             Clip.At(21, new BenchClip { A = 21f, B = 2.1f }),
-            Clip.At(40, new BenchClip { A = 40f, B = 4f }),
+            Clip.At(40, new BenchClip { A = 40f, B = 4f })
         ];
         pulseBuilder.AddTrack(_pulseTimeline, BenchTypes.Clip, new BindingId(0), TrackMode.Exclusive, pulseClips);
         _dbPulse = pulseBuilder.Build();
@@ -132,86 +137,90 @@ public class TimelineBenchmarks
         _singleCursor = [new TimelineCursor(_timelineIds[0], 24, TimelineDirection.Forward)];
         _eightCursors = new TimelineCursor[8];
 
-        for (int i = 0; i < 8; i++)
-        {
+        for (var i = 0; i < 8; i++)
             _eightCursors[i] = new TimelineCursor(_timelineIds[i], 24, TimelineDirection.Forward);
-        }
 
         VerifyProtocol();
     }
 
     private void VerifyProtocol()
     {
-        const float Tolerance = 1e-4f;
+        const float tolerance = 1e-4f;
 
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
-        TrackInstance track = query.Tracks(_timelineIds[0])[0];
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
+        var track = query.Tracks(_timelineIds[0])[0];
 
         WeightedSum weighted = default;
-        ClipFrameEnumerator frame = query.Frame(in track, 24, TimelineDirection.Forward);
+        var frame = query.Frame(in track, 24, TimelineDirection.Forward);
         while (frame.MoveNext())
         {
-            ref readonly BenchClip clip = ref query.Data(frame.Current.DataOffset);
+            ref readonly var clip = ref query.Data(frame.Current.DataOffset);
             weighted.A += clip.A * frame.Current.Weight;
             weighted.B += clip.B * frame.Current.Weight;
         }
-        AssertApprox("FrameExclusive", weighted.A + weighted.B, 1.5f, Tolerance);
 
-        DatabaseView crossView = _dbCrossFade.AsView();
-        ClipQuery<BenchClip> crossQuery = crossView.Query(_handleCrossFade);
-        TrackInstance crossTrack = crossQuery.Tracks(_crossFadeTimeline)[0];
+        AssertApprox("FrameExclusive", weighted.A + weighted.B, 1.5f, tolerance);
+
+        var crossView = _dbCrossFade.AsView();
+        var crossQuery = crossView.Query(_handleCrossFade);
+        var crossTrack = crossQuery.Tracks(_crossFadeTimeline)[0];
         weighted = default;
         frame = crossQuery.Frame(in crossTrack, 18, TimelineDirection.Forward);
         while (frame.MoveNext())
         {
-            ref readonly BenchClip clip = ref crossQuery.Data(frame.Current.DataOffset);
+            ref readonly var clip = ref crossQuery.Data(frame.Current.DataOffset);
             weighted.A += clip.A * frame.Current.Weight;
             weighted.B += clip.B * frame.Current.Weight;
         }
-        AssertApprox("FrameCrossFade", weighted.A + weighted.B, 9.9f / 7f, Tolerance);
 
-        float sum = 0f;
-        ClipSampleEnumerator samples = query.Sample(in track, 24);
+        AssertApprox("FrameCrossFade", weighted.A + weighted.B, 9.9f / 7f, tolerance);
+
+        var sum = 0f;
+        var samples = query.Sample(in track, 24);
         while (samples.MoveNext())
         {
-            ClipSample sample = samples.Current;
-            ref readonly BenchClip clip = ref query.Data(sample.DataOffset);
+            var sample = samples.Current;
+            ref readonly var clip = ref query.Data(sample.DataOffset);
             sum += (clip.A + clip.B) * sample.Weight;
         }
-        AssertApprox("SampleExclusive", sum, 1.5f, Tolerance);
+
+        AssertApprox("SampleExclusive", sum, 1.5f, tolerance);
 
         sum = 0f;
         samples = crossQuery.Sample(in crossTrack, 18);
         while (samples.MoveNext())
         {
-            ClipSample sample = samples.Current;
-            ref readonly BenchClip clip = ref crossQuery.Data(sample.DataOffset);
+            var sample = samples.Current;
+            ref readonly var clip = ref crossQuery.Data(sample.DataOffset);
             sum += (clip.A + clip.B) * sample.Weight;
         }
-        AssertApprox("SampleCrossFade", sum, 9.9f / 7f, Tolerance);
+
+        AssertApprox("SampleCrossFade", sum, 9.9f / 7f, tolerance);
 
         SampleSum fused = default;
         query.Sample(in track, 24, ref fused);
-        AssertApprox("SampleFusedOneTrack", fused.A + fused.B, 1.5f, Tolerance);
+        AssertApprox("SampleFusedOneTrack", fused.A + fused.B, 1.5f, tolerance);
 
         fused = default;
         query.Sample(_eightCursors.AsSpan(), ref fused);
-        AssertApprox("SampleEightCursors", fused.A + fused.B, 292f, Tolerance);
+        AssertApprox("SampleEightCursors", fused.A + fused.B, 292f, tolerance);
 
         weighted = default;
         query.Visit(_singleCursor.AsSpan(), ref weighted);
-        AssertApprox("VisitOneCursor", weighted.A + weighted.B, 1.5f, Tolerance);
+        AssertApprox("VisitOneCursor", weighted.A + weighted.B, 1.5f, tolerance);
 
         weighted = default;
         query.Visit(_eightCursors.AsSpan(), ref weighted);
-        AssertApprox("VisitEightCursors", weighted.A + weighted.B, 292f, Tolerance);
+        AssertApprox("VisitEightCursors", weighted.A + weighted.B, 292f, tolerance);
 
-        DatabaseView pulseView = _dbPulse.AsView();
-        ClipQuery<BenchClip> pulseQuery = pulseView.Query(_handlePulse);
+        var pulseView = _dbPulse.AsView();
+        var pulseQuery = pulseView.Query(_handlePulse);
         AssertEqual("TraverseForwardOneTick", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 4, 5)), 1);
-        AssertEqual("TraverseForwardFullLoop", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 0, 63)), 5);
-        AssertEqual("TraverseRewindTwentyFive", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 25, 5)), 4);
+        AssertEqual("TraverseForwardFullLoop", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 0, 63)),
+            5);
+        AssertEqual("TraverseRewindTwentyFive", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 25, 5)),
+            4);
 
         AssertEqual("QuerySetupOnly", query.Tracks(_timelineIds[0]).Length, 1);
     }
@@ -225,33 +234,29 @@ public class TimelineBenchmarks
     private static void AssertApprox(string scenario, float actual, float expected, float tolerance)
     {
         if (MathF.Abs(actual - expected) > tolerance)
-        {
             throw new InvalidOperationException(
                 $"protocol verify failed: {scenario} produced {actual}, expected {expected}.");
-        }
     }
 
     private static void AssertEqual(string scenario, long actual, long expected)
     {
         if (actual != expected)
-        {
             throw new InvalidOperationException(
                 $"protocol verify failed: {scenario} produced {actual}, expected {expected}.");
-        }
     }
 
     [Benchmark]
     public float FrameExclusive()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
-        TrackInstance track = query.Tracks(_timelineIds[0])[0];
-        ClipFrameEnumerator frame = query.Frame(in track, 24, TimelineDirection.Forward);
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
+        var track = query.Tracks(_timelineIds[0])[0];
+        var frame = query.Frame(in track, 24, TimelineDirection.Forward);
         WeightedSum sum = default;
 
         while (frame.MoveNext())
         {
-            ref readonly BenchClip clip = ref query.Data(frame.Current.DataOffset);
+            ref readonly var clip = ref query.Data(frame.Current.DataOffset);
             sum.A += clip.A * frame.Current.Weight;
             sum.B += clip.B * frame.Current.Weight;
         }
@@ -262,15 +267,15 @@ public class TimelineBenchmarks
     [Benchmark]
     public float FrameCrossFade()
     {
-        DatabaseView view = _dbCrossFade.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleCrossFade);
-        TrackInstance track = query.Tracks(_crossFadeTimeline)[0];
-        ClipFrameEnumerator frame = query.Frame(in track, 18, TimelineDirection.Forward);
+        var view = _dbCrossFade.AsView();
+        var query = view.Query(_handleCrossFade);
+        var track = query.Tracks(_crossFadeTimeline)[0];
+        var frame = query.Frame(in track, 18, TimelineDirection.Forward);
         WeightedSum sum = default;
 
         while (frame.MoveNext())
         {
-            ref readonly BenchClip clip = ref query.Data(frame.Current.DataOffset);
+            ref readonly var clip = ref query.Data(frame.Current.DataOffset);
             sum.A += clip.A * frame.Current.Weight;
             sum.B += clip.B * frame.Current.Weight;
         }
@@ -281,16 +286,16 @@ public class TimelineBenchmarks
     [Benchmark]
     public float SampleExclusive()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
-        TrackInstance track = query.Tracks(_timelineIds[0])[0];
-        ClipSampleEnumerator samples = query.Sample(in track, 24);
-        float sum = 0f;
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
+        var track = query.Tracks(_timelineIds[0])[0];
+        var samples = query.Sample(in track, 24);
+        var sum = 0f;
 
         while (samples.MoveNext())
         {
-            ClipSample sample = samples.Current;
-            ref readonly BenchClip clip = ref query.Data(sample.DataOffset);
+            var sample = samples.Current;
+            ref readonly var clip = ref query.Data(sample.DataOffset);
             sum += (clip.A + clip.B) * sample.Weight;
         }
 
@@ -300,16 +305,16 @@ public class TimelineBenchmarks
     [Benchmark]
     public float SampleCrossFade()
     {
-        DatabaseView view = _dbCrossFade.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleCrossFade);
-        TrackInstance track = query.Tracks(_crossFadeTimeline)[0];
-        ClipSampleEnumerator samples = query.Sample(in track, 18);
-        float sum = 0f;
+        var view = _dbCrossFade.AsView();
+        var query = view.Query(_handleCrossFade);
+        var track = query.Tracks(_crossFadeTimeline)[0];
+        var samples = query.Sample(in track, 18);
+        var sum = 0f;
 
         while (samples.MoveNext())
         {
-            ClipSample sample = samples.Current;
-            ref readonly BenchClip clip = ref query.Data(sample.DataOffset);
+            var sample = samples.Current;
+            ref readonly var clip = ref query.Data(sample.DataOffset);
             sum += (clip.A + clip.B) * sample.Weight;
         }
 
@@ -319,9 +324,9 @@ public class TimelineBenchmarks
     [Benchmark]
     public float SampleFusedOneTrack()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
-        TrackInstance track = query.Tracks(_timelineIds[0])[0];
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
+        var track = query.Tracks(_timelineIds[0])[0];
         SampleSum acc = default;
         query.Sample(in track, 24, ref acc);
         return acc.A + acc.B;
@@ -330,8 +335,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public float SampleEightCursors()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
         SampleSum sum = default;
         query.Sample(_eightCursors.AsSpan(), ref sum);
         return sum.A + sum.B;
@@ -340,8 +345,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public float VisitOneCursor()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
         WeightedSum sum = default;
         query.Visit(_singleCursor.AsSpan(), ref sum);
         return sum.A + sum.B;
@@ -350,8 +355,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public float VisitEightCursors()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
         WeightedSum sum = default;
         query.Visit(_eightCursors.AsSpan(), ref sum);
         return sum.A + sum.B;
@@ -360,8 +365,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public long TraverseForwardOneTick()
     {
-        DatabaseView view = _dbPulse.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handlePulse);
+        var view = _dbPulse.AsView();
+        var query = view.Query(_handlePulse);
         TimelineSpan span = new(_pulseTimeline, 4, 5);
         TransitionCounter counter = default;
         return query.TraverseTransitions(in span, ref counter) + counter.Count;
@@ -370,8 +375,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public long TraverseForwardFullLoop()
     {
-        DatabaseView view = _dbPulse.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handlePulse);
+        var view = _dbPulse.AsView();
+        var query = view.Query(_handlePulse);
         TimelineSpan span = new(_pulseTimeline, 0, 63);
         TransitionCounter counter = default;
         return query.TraverseTransitions(in span, ref counter) + counter.Count;
@@ -380,8 +385,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public long TraverseRewindTwentyFive()
     {
-        DatabaseView view = _dbPulse.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handlePulse);
+        var view = _dbPulse.AsView();
+        var query = view.Query(_handlePulse);
         TimelineSpan span = new(_pulseTimeline, 25, 5);
         TransitionCounter counter = default;
         return query.TraverseTransitions(in span, ref counter) + counter.Count;
@@ -390,8 +395,8 @@ public class TimelineBenchmarks
     [Benchmark]
     public float QuerySetupOnly()
     {
-        DatabaseView view = _dbExclusive.AsView();
-        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        var view = _dbExclusive.AsView();
+        var query = view.Query(_handleExclusive);
         return query.Tracks(_timelineIds[0]).Length;
     }
 }
