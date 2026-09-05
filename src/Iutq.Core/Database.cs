@@ -802,13 +802,10 @@ public readonly ref struct DatabaseView
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ClipQuery<TClip> Query<TClip>(ClipTypeHandle<TClip> handle) where TClip : unmanaged
     {
-        if (!handle.IsValid || (uint)handle.TypeSlot >= (uint)Types.Length)
-        {
-            Check.HandleUsable(in handle);
-            return default;
-        }
-
-        return new ClipQuery<TClip>(this, handle.TypeSlot);
+        if (handle.IsValid && (uint)handle.TypeSlot < (uint)Types.Length)
+            return new ClipQuery<TClip>(this, handle.TypeSlot);
+        Check.HandleUsable(in handle);
+        return default;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
