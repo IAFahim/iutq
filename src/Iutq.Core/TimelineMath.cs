@@ -22,11 +22,11 @@ public static class TimelineMath
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float Progress(int tick, int start, int end)
     {
-        var frames = end - start;
+        var duration = end - start;
 
-        if (frames <= 1) return 0f;
+        if (duration <= 1) return 0f;
 
-        return (float)(tick - start) / (frames - 1);
+        return (float)(tick - start) / (duration - 1);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -36,9 +36,9 @@ public static class TimelineMath
         int end,
         TimelineDirection direction)
     {
-        var frames = end - start;
+        var duration = end - start;
 
-        if (frames == 1)
+        if (duration == 1)
             return direction == TimelineDirection.None
                 ? ClipPhase.None
                 : ClipPhase.Enter;
@@ -56,7 +56,7 @@ public static class TimelineMath
             if (tick == start) return ClipPhase.Exit;
         }
 
-        return ClipPhase.Stay;
+        return ClipPhase.Active;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -66,9 +66,9 @@ public static class TimelineMath
         int end,
         TimelineDirection direction)
     {
-        var frames = end - start;
+        var duration = end - start;
 
-        if (frames == 1)
+        if (duration == 1)
             return direction == TimelineDirection.None
                 ? BlendPhase.None
                 : BlendPhase.Enter;
@@ -86,16 +86,16 @@ public static class TimelineMath
             if (tick == start) return BlendPhase.Exit;
         }
 
-        return BlendPhase.Stay;
+        return BlendPhase.Active;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float BlendFactor(int tick, int start, int end)
     {
-        var frames = end - start;
+        var duration = end - start;
 
-        if (frames <= 1) return 0.5f;
+        if (duration <= 1) return 0.5f;
 
-        return (float)(tick - start) / (frames - 1);
+        return (float)(tick - start) / (duration - 1);
     }
 }

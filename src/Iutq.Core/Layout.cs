@@ -38,7 +38,7 @@ public enum ClipPhase : byte
 {
     None = 0,
     Enter = 1,
-    Stay = 2,
+    Active = 2,
     Exit = 3
 }
 
@@ -46,33 +46,33 @@ public enum BlendPhase : byte
 {
     None = 0,
     Enter = 1,
-    Stay = 2,
+    Active = 2,
     Exit = 3
 }
 
 internal enum BoundaryKind : byte
 {
-    ClipLeft = 0,
-    BlendLeft = 1,
-    ClipSingle = 2,
-    BlendSingle = 3,
-    BlendRight = 4,
-    ClipRight = 5
+    ClipStart = 0,
+    BlendStart = 1,
+    ClipInstant = 2,
+    BlendInstant = 3,
+    BlendEnd = 4,
+    ClipEnd = 5
 }
 
 public readonly record struct TimelineKey(ulong Value);
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TimelineId
+public readonly struct TimelineIndex
 {
     public readonly int Value;
 
-    public TimelineId(int value)
+    public TimelineIndex(int value)
     {
         Value = value;
     }
 
-    public static readonly TimelineId None = new(-1);
+    public static readonly TimelineIndex None = new(-1);
 
     public bool IsValid => Value >= 0;
 }
@@ -111,12 +111,12 @@ public readonly struct ClipType<T>
     Justification =
         "Phantom type parameter: statically binds a handle to its payload type with no runtime representation.")]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct ClipHandle<T>
+public readonly struct ClipTypeHandle<T>
     where T : unmanaged
 {
     private readonly int _slotPlusOne;
 
-    internal ClipHandle(int typeSlot)
+    internal ClipTypeHandle(int typeSlot)
     {
         _slotPlusOne = checked(typeSlot + 1);
     }
@@ -129,11 +129,11 @@ public readonly struct ClipHandle<T>
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct TimelineCursor
 {
-    public readonly TimelineId Timeline;
+    public readonly TimelineIndex Timeline;
     public readonly int Tick;
     public readonly TimelineDirection Direction;
 
-    public TimelineCursor(TimelineId timeline, int tick, TimelineDirection direction)
+    public TimelineCursor(TimelineIndex timeline, int tick, TimelineDirection direction)
     {
         Timeline = timeline;
         Tick = tick;
@@ -144,11 +144,11 @@ public readonly struct TimelineCursor
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 public readonly struct TimelineSpan
 {
-    public readonly TimelineId Timeline;
+    public readonly TimelineIndex Timeline;
     public readonly long PreviousRawTick;
     public readonly long CurrentRawTick;
 
-    public TimelineSpan(TimelineId timeline, long previousRawTick, long currentRawTick)
+    public TimelineSpan(TimelineIndex timeline, long previousRawTick, long currentRawTick)
     {
         Timeline = timeline;
         PreviousRawTick = previousRawTick;
@@ -200,17 +200,17 @@ public readonly struct TimelineHeader : IEquatable<TimelineHeader>
 public readonly struct TimelineLookupEntry : IEquatable<TimelineLookupEntry>
 {
     public readonly ulong Key;
-    public readonly int TimelineId;
+    public readonly int TimelineIndex;
 
-    public TimelineLookupEntry(ulong key, int timelineId)
+    public TimelineLookupEntry(ulong key, int timelineIndex)
     {
         Key = key;
-        TimelineId = timelineId;
+        TimelineIndex = timelineIndex;
     }
 
     public bool Equals(TimelineLookupEntry other)
     {
-        return Key == other.Key && TimelineId == other.TimelineId;
+        return Key == other.Key && TimelineIndex == other.TimelineIndex;
     }
 
     public override bool Equals(object? obj)
@@ -230,7 +230,7 @@ public readonly struct TimelineLookupEntry : IEquatable<TimelineLookupEntry>
 
     public override int GetHashCode()
     {
-        return HashCode.Combine(Key, TimelineId);
+        return HashCode.Combine(Key, TimelineIndex);
     }
 }
 
@@ -238,17 +238,17 @@ public readonly struct TimelineLookupEntry : IEquatable<TimelineLookupEntry>
 public readonly struct TrackInstance : IEquatable<TrackInstance>
 {
     public readonly int Binding;
-    public readonly int TrackDataId;
+    public readonly int TrackTemplateId;
 
     public TrackInstance(int binding, int trackDataId)
     {
         Binding = binding;
-        TrackDataId = trackDataId;
+        TrackTemplateId = trackDataId;
     }
 
     public bool Equals(TrackInstance other)
     {
-        return Binding == other.Binding && TrackDataId == other.TrackDataId;
+        return Binding == other.Binding && TrackTemplateId == other.TrackTemplateId;
     }
 
     public override bool Equals(object? obj)
@@ -268,12 +268,12 @@ public readonly struct TrackInstance : IEquatable<TrackInstance>
 
     public override int GetHashCode()
     {
-        return HashCode.Combine(Binding, TrackDataId);
+        return HashCode.Combine(Binding, TrackTemplateId);
     }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TrackData : IEquatable<TrackData>
+public readonly struct TrackTemplate : IEquatable<TrackTemplate>
 {
     public readonly ulong TypeKey;
     public readonly int ClipStart;
@@ -283,7 +283,7 @@ public readonly struct TrackData : IEquatable<TrackData>
     public readonly int BoundaryCount;
     public readonly TrackMode Mode;
 
-    public TrackData(
+    public TrackTemplate(
         ulong typeKey,
         int clipStart,
         int clipCount,
@@ -301,7 +301,7 @@ public readonly struct TrackData : IEquatable<TrackData>
         Mode = mode;
     }
 
-    public bool Equals(TrackData other)
+    public bool Equals(TrackTemplate other)
     {
         return TypeKey == other.TypeKey &&
                ClipStart == other.ClipStart &&
@@ -314,15 +314,15 @@ public readonly struct TrackData : IEquatable<TrackData>
 
     public override bool Equals(object? obj)
     {
-        return obj is TrackData other && Equals(other);
+        return obj is TrackTemplate other && Equals(other);
     }
 
-    public static bool operator ==(TrackData left, TrackData right)
+    public static bool operator ==(TrackTemplate left, TrackTemplate right)
     {
         return left.Equals(right);
     }
 
-    public static bool operator !=(TrackData left, TrackData right)
+    public static bool operator !=(TrackTemplate left, TrackTemplate right)
     {
         return !left.Equals(right);
     }
@@ -336,29 +336,29 @@ public readonly struct TrackData : IEquatable<TrackData>
 public readonly ref struct TrackRef
 {
     public readonly ref readonly TrackInstance Instance;
-    public readonly ref readonly TrackData Data;
+    public readonly ref readonly TrackTemplate Template;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public TrackRef(in TrackInstance instance, in TrackData data)
+    public TrackRef(in TrackInstance instance, in TrackTemplate template)
     {
         Instance = ref instance;
-        Data = ref data;
+        Template = ref template;
     }
 
     public int Binding => Instance.Binding;
-    public int TrackDataId => Instance.TrackDataId;
-    public TrackMode Mode => Data.Mode;
+    public int TrackTemplateId => Instance.TrackTemplateId;
+    public TrackMode Mode => Template.Mode;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct ClipHeader : IEquatable<ClipHeader>
+public readonly struct ClipEntry : IEquatable<ClipEntry>
 {
     public readonly int Start;
     public readonly int End;
     public readonly int DataOffset;
     public readonly ClipEase Ease;
 
-    public ClipHeader(int start, int end, int dataOffset, ClipEase ease)
+    public ClipEntry(int start, int end, int dataOffset, ClipEase ease)
     {
         Start = start;
         End = end;
@@ -366,22 +366,22 @@ public readonly struct ClipHeader : IEquatable<ClipHeader>
         Ease = ease;
     }
 
-    public bool Equals(ClipHeader other)
+    public bool Equals(ClipEntry other)
     {
         return Start == other.Start && End == other.End && DataOffset == other.DataOffset && Ease == other.Ease;
     }
 
     public override bool Equals(object? obj)
     {
-        return obj is ClipHeader other && Equals(other);
+        return obj is ClipEntry other && Equals(other);
     }
 
-    public static bool operator ==(ClipHeader left, ClipHeader right)
+    public static bool operator ==(ClipEntry left, ClipEntry right)
     {
         return left.Equals(right);
     }
 
-    public static bool operator !=(ClipHeader left, ClipHeader right)
+    public static bool operator !=(ClipEntry left, ClipEntry right)
     {
         return !left.Equals(right);
     }
@@ -395,14 +395,14 @@ public readonly struct ClipHeader : IEquatable<ClipHeader>
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-internal readonly struct BoundaryHeader : IEquatable<BoundaryHeader>
+internal readonly struct TrackBoundary : IEquatable<TrackBoundary>
 {
     public readonly int Tick;
     public readonly int ClipA;
     public readonly int ClipB;
     public readonly BoundaryKind Kind;
 
-    public BoundaryHeader(int tick, int clipA, int clipB, BoundaryKind kind)
+    public TrackBoundary(int tick, int clipA, int clipB, BoundaryKind kind)
     {
         Tick = tick;
         ClipA = clipA;
@@ -410,22 +410,22 @@ internal readonly struct BoundaryHeader : IEquatable<BoundaryHeader>
         Kind = kind;
     }
 
-    public bool Equals(BoundaryHeader other)
+    public bool Equals(TrackBoundary other)
     {
         return Tick == other.Tick && ClipA == other.ClipA && ClipB == other.ClipB && Kind == other.Kind;
     }
 
     public override bool Equals(object? obj)
     {
-        return obj is BoundaryHeader other && Equals(other);
+        return obj is TrackBoundary other && Equals(other);
     }
 
-    public static bool operator ==(BoundaryHeader left, BoundaryHeader right)
+    public static bool operator ==(TrackBoundary left, TrackBoundary right)
     {
         return left.Equals(right);
     }
 
-    public static bool operator !=(BoundaryHeader left, BoundaryHeader right)
+    public static bool operator !=(TrackBoundary left, TrackBoundary right)
     {
         return !left.Equals(right);
     }
@@ -475,25 +475,25 @@ public readonly struct TypeDescriptor : IEquatable<TypeDescriptor>
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct TypePartition : IEquatable<TypePartition>
+public readonly struct TrackSpan : IEquatable<TrackSpan>
 {
     public readonly int TrackStart;
     public readonly int TrackCount;
 
-    public TypePartition(int trackStart, int trackCount)
+    public TrackSpan(int trackStart, int trackCount)
     {
         TrackStart = trackStart;
         TrackCount = trackCount;
     }
 
-    public bool Equals(TypePartition other)
+    public bool Equals(TrackSpan other)
     {
         return TrackStart == other.TrackStart && TrackCount == other.TrackCount;
     }
 
     public override bool Equals(object? obj)
     {
-        return obj is TypePartition other && Equals(other);
+        return obj is TrackSpan other && Equals(other);
     }
 
     public override int GetHashCode()
@@ -501,12 +501,12 @@ public readonly struct TypePartition : IEquatable<TypePartition>
         return HashCode.Combine(TrackStart, TrackCount);
     }
 
-    public static bool operator ==(TypePartition left, TypePartition right)
+    public static bool operator ==(TrackSpan left, TrackSpan right)
     {
         return left.Equals(right);
     }
 
-    public static bool operator !=(TypePartition left, TypePartition right)
+    public static bool operator !=(TrackSpan left, TrackSpan right)
     {
         return !left.Equals(right);
     }
@@ -526,7 +526,7 @@ public readonly struct ClipSample
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
-public readonly struct ClipHit
+public readonly struct ClipFrame
 {
     public readonly int Start;
     public readonly int End;
@@ -538,7 +538,7 @@ public readonly struct ClipHit
     public readonly float Weight;
     public readonly float BlendFactor;
 
-    internal ClipHit(
+    internal ClipFrame(
         int start,
         int end,
         int tick,
@@ -570,7 +570,7 @@ public readonly struct ClipHit
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct ClipTransition
 {
-    public readonly long OccurrenceTick;
+    public readonly long GlobalTick;
     public readonly int Tick;
     public readonly TimelineDirection Direction;
     public readonly ClipPhase Phase;
@@ -583,7 +583,7 @@ public readonly struct ClipTransition
         ClipPhase phase,
         int dataOffset)
     {
-        OccurrenceTick = occurrenceTick;
+        GlobalTick = occurrenceTick;
         Tick = tick;
         Direction = direction;
         Phase = phase;
@@ -594,7 +594,7 @@ public readonly struct ClipTransition
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct BlendTransition
 {
-    public readonly long OccurrenceTick;
+    public readonly long GlobalTick;
     public readonly int Tick;
     public readonly TimelineDirection Direction;
     public readonly BlendPhase Phase;
@@ -611,7 +611,7 @@ public readonly struct BlendTransition
         int dataOffsetB,
         float factor)
     {
-        OccurrenceTick = occurrenceTick;
+        GlobalTick = occurrenceTick;
         Tick = tick;
         Direction = direction;
         Phase = phase;

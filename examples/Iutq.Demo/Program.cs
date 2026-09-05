@@ -56,10 +56,10 @@ public struct TotalForceVisitor : IClipFrameVisitor<ForceClip>
     public float Forward;
     public float Up;
 
-    public void Visit(in TrackInstance track, in ClipHit hit, in ForceClip clip)
+    public void Visit(in TrackInstance track, in ClipFrame frame, in ForceClip clip)
     {
-        Forward += clip.Forward * hit.Weight;
-        Up += clip.Up * hit.Weight;
+        Forward += clip.Forward * frame.Weight;
+        Up += clip.Up * frame.Weight;
     }
 }
 
@@ -67,12 +67,12 @@ public struct DamageTransitions : IClipTransitionVisitor<DamagePulseClip>
 {
     public int Damage;
 
-    public void Clip(in TrackInstance track, in ClipTransition transition, in DamagePulseClip clip)
+    public void OnClipTransition(in TrackInstance track, in ClipTransition transition, in DamagePulseClip clip)
     {
         if (transition.Phase == ClipPhase.Enter) Damage += clip.Damage;
     }
 
-    public void Blend(
+    public void OnBlendTransition(
         in TrackInstance track,
         in BlendTransition transition,
         in DamagePulseClip clipA,
@@ -83,18 +83,18 @@ public struct DamageTransitions : IClipTransitionVisitor<DamagePulseClip>
 
 public sealed class TimelineRuntime
 {
-    public readonly ClipHandle<DamagePulseClip> DamagePulse;
-    public readonly TimelineId Dash;
+    public readonly ClipTypeHandle<DamagePulseClip> DamagePulse;
+    public readonly TimelineIndex Dash;
     public readonly TimelineDatabase Database;
-    public readonly ClipHandle<ForceClip> Force;
-    public readonly TimelineId LightAttack;
+    public readonly ClipTypeHandle<ForceClip> Force;
+    public readonly TimelineIndex LightAttack;
 
     private TimelineRuntime(
         TimelineDatabase database,
-        TimelineId lightAttack,
-        TimelineId dash,
-        ClipHandle<ForceClip> force,
-        ClipHandle<DamagePulseClip> damagePulse)
+        TimelineIndex lightAttack,
+        TimelineIndex dash,
+        ClipTypeHandle<ForceClip> force,
+        ClipTypeHandle<DamagePulseClip> damagePulse)
     {
         Database = database;
         LightAttack = lightAttack;
@@ -112,7 +112,7 @@ public sealed class TimelineRuntime
         ForceClip attackForce = new(14f, 2f);
         ForceClip attackRecovery = new(4f, 0f);
         ForceClip dashForce = new(24f, 0f);
-        DamagePulseClip hit = new(35);
+        DamagePulseClip pulse = new(35);
 
         builder.AddTrack(
             lightAttack,
@@ -130,7 +130,7 @@ public sealed class TimelineRuntime
             new BindingId(0),
             TrackMode.Exclusive,
             [
-                Clip.At(7, in hit)
+                Clip.At(7, in pulse)
             ]);
 
         builder.AddTrack(
@@ -208,7 +208,7 @@ public static class Program
         var db = runtime.Database.AsView();
         var force = db.Query(runtime.Force);
         TotalForceVisitor visitor = default;
-        force.Visit(playerTimelines, ref visitor);
+        force.VisitFrames(playerTimelines, ref visitor);
 
         var damage = DamageSystem.CatchUp(
             runtime,

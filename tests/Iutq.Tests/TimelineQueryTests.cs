@@ -28,7 +28,7 @@ public struct TransitionRecorder : IClipTransitionVisitor<TestClip>
     public int BlendExit;
     public int Value;
 
-    public void Clip(in TrackInstance track, in ClipTransition transition, in TestClip clip)
+    public void OnClipTransition(in TrackInstance track, in ClipTransition transition, in TestClip clip)
     {
         if (transition.Phase == ClipPhase.Enter)
         {
@@ -41,7 +41,7 @@ public struct TransitionRecorder : IClipTransitionVisitor<TestClip>
         }
     }
 
-    public void Blend(
+    public void OnBlendTransition(
         in TrackInstance track,
         in BlendTransition transition,
         in TestClip clipA,
@@ -55,27 +55,27 @@ public struct TransitionRecorder : IClipTransitionVisitor<TestClip>
 
 public struct OccurrenceRecorder : IClipTransitionVisitor<TestClip>
 {
-    public long FirstOccurrenceTick;
-    public long SecondOccurrenceTick;
+    public long FirstGlobalTick;
+    public long SecondGlobalTick;
     public ClipPhase FirstPhase;
     public int Count;
 
-    public void Clip(in TrackInstance track, in ClipTransition transition, in TestClip clip)
+    public void OnClipTransition(in TrackInstance track, in ClipTransition transition, in TestClip clip)
     {
         if (Count == 0)
         {
-            FirstOccurrenceTick = transition.OccurrenceTick;
+            FirstGlobalTick = transition.GlobalTick;
             FirstPhase = transition.Phase;
         }
         else if (Count == 1)
         {
-            SecondOccurrenceTick = transition.OccurrenceTick;
+            SecondGlobalTick = transition.GlobalTick;
         }
 
         Count++;
     }
 
-    public void Blend(
+    public void OnBlendTransition(
         in TrackInstance track,
         in BlendTransition transition,
         in TestClip clipA,
@@ -98,21 +98,21 @@ public sealed class TimelineQueryTests
         var handle = db.Resolve(TestTypes.Clip);
         var view = db.AsView();
         var query = view.Query(handle);
-        var track = query.Tracks(new TimelineId(0))[0];
+        var track = query.Tracks(new TimelineIndex(0))[0];
 
-        Assert.Equal(ClipPhase.Enter, First(query.Frame(in track, 10, TimelineDirection.Forward)).Phase);
-        Assert.Equal(ClipPhase.Stay, First(query.Frame(in track, 11, TimelineDirection.Forward)).Phase);
-        Assert.Equal(ClipPhase.Stay, First(query.Frame(in track, 13, TimelineDirection.Forward)).Phase);
-        Assert.Equal(ClipPhase.Exit, First(query.Frame(in track, 14, TimelineDirection.Forward)).Phase);
+        Assert.Equal(ClipPhase.Enter, First(query.VisitFrames(in track, 10, TimelineDirection.Forward)).Phase);
+        Assert.Equal(ClipPhase.Active, First(query.VisitFrames(in track, 11, TimelineDirection.Forward)).Phase);
+        Assert.Equal(ClipPhase.Active, First(query.VisitFrames(in track, 13, TimelineDirection.Forward)).Phase);
+        Assert.Equal(ClipPhase.Exit, First(query.VisitFrames(in track, 14, TimelineDirection.Forward)).Phase);
 
-        Assert.Equal(ClipPhase.Enter, First(query.Frame(in track, 14, TimelineDirection.Reverse)).Phase);
-        Assert.Equal(ClipPhase.Stay, First(query.Frame(in track, 13, TimelineDirection.Reverse)).Phase);
-        Assert.Equal(ClipPhase.Stay, First(query.Frame(in track, 11, TimelineDirection.Reverse)).Phase);
-        Assert.Equal(ClipPhase.Exit, First(query.Frame(in track, 10, TimelineDirection.Reverse)).Phase);
-        Assert.Equal(ClipPhase.Stay, First(query.Frame(in track, 12, TimelineDirection.None)).Phase);
+        Assert.Equal(ClipPhase.Enter, First(query.VisitFrames(in track, 14, TimelineDirection.Reverse)).Phase);
+        Assert.Equal(ClipPhase.Active, First(query.VisitFrames(in track, 13, TimelineDirection.Reverse)).Phase);
+        Assert.Equal(ClipPhase.Active, First(query.VisitFrames(in track, 11, TimelineDirection.Reverse)).Phase);
+        Assert.Equal(ClipPhase.Exit, First(query.VisitFrames(in track, 10, TimelineDirection.Reverse)).Phase);
+        Assert.Equal(ClipPhase.Active, First(query.VisitFrames(in track, 12, TimelineDirection.None)).Phase);
 
-        Assert.Equal(0f, First(query.Frame(in track, 10, TimelineDirection.Forward)).Progress, 4);
-        Assert.Equal(1f, First(query.Frame(in track, 14, TimelineDirection.Forward)).Progress, 4);
+        Assert.Equal(0f, First(query.VisitFrames(in track, 10, TimelineDirection.Forward)).Progress, 4);
+        Assert.Equal(1f, First(query.VisitFrames(in track, 14, TimelineDirection.Forward)).Progress, 4);
     }
 
     [Fact]
@@ -126,19 +126,19 @@ public sealed class TimelineQueryTests
         var handle = db.Resolve(TestTypes.Clip);
         var view = db.AsView();
         var query = view.Query(handle);
-        var track = query.Tracks(new TimelineId(0))[0];
+        var track = query.Tracks(new TimelineIndex(0))[0];
 
-        Assert.Equal(ClipPhase.Enter, First(query.Frame(in track, 10, TimelineDirection.Forward)).Phase);
-        Assert.Equal(ClipPhase.Enter, First(query.Frame(in track, 10, TimelineDirection.Reverse)).Phase);
-        Assert.Equal(ClipPhase.None, First(query.Frame(in track, 10, TimelineDirection.None)).Phase);
+        Assert.Equal(ClipPhase.Enter, First(query.VisitFrames(in track, 10, TimelineDirection.Forward)).Phase);
+        Assert.Equal(ClipPhase.Enter, First(query.VisitFrames(in track, 10, TimelineDirection.Reverse)).Phase);
+        Assert.Equal(ClipPhase.None, First(query.VisitFrames(in track, 10, TimelineDirection.None)).Phase);
 
         TransitionRecorder forward = default;
-        query.TraverseTransitions(new TimelineSpan(new TimelineId(0), 9, 10), ref forward);
+        query.TraverseTransitions(new TimelineSpan(new TimelineIndex(0), 9, 10), ref forward);
         Assert.Equal(1, forward.ClipEnter);
         Assert.Equal(0, forward.ClipExit);
 
         TransitionRecorder reverse = default;
-        query.TraverseTransitions(new TimelineSpan(new TimelineId(0), 11, 10), ref reverse);
+        query.TraverseTransitions(new TimelineSpan(new TimelineIndex(0), 11, 10), ref reverse);
         Assert.Equal(1, reverse.ClipEnter);
         Assert.Equal(0, reverse.ClipExit);
     }
@@ -151,22 +151,22 @@ public sealed class TimelineQueryTests
         var handle = db.Resolve(TestTypes.Clip);
         var view = db.AsView();
         var query = view.Query(handle);
-        var track = query.Tracks(new TimelineId(0))[0];
+        var track = query.Tracks(new TimelineIndex(0))[0];
 
-        var start = ReadFrame(query.Frame(in track, 3, TimelineDirection.Forward));
+        var start = ReadFrame(query.VisitFrames(in track, 3, TimelineDirection.Forward));
         Assert.Equal(2, start.Length);
         Assert.Equal(BlendPhase.Enter, start[0].BlendPhase);
         Assert.Equal(BlendPhase.Enter, start[1].BlendPhase);
         Assert.Equal(1f, start[0].Weight, 4);
         Assert.Equal(0f, start[1].Weight, 4);
 
-        var end = ReadFrame(query.Frame(in track, 4, TimelineDirection.Forward));
+        var end = ReadFrame(query.VisitFrames(in track, 4, TimelineDirection.Forward));
         Assert.Equal(BlendPhase.Exit, end[0].BlendPhase);
         Assert.Equal(BlendPhase.Exit, end[1].BlendPhase);
         Assert.Equal(0f, end[0].Weight, 4);
         Assert.Equal(1f, end[1].Weight, 4);
 
-        var reverseStart = ReadFrame(query.Frame(in track, 4, TimelineDirection.Reverse));
+        var reverseStart = ReadFrame(query.VisitFrames(in track, 4, TimelineDirection.Reverse));
         Assert.Equal(BlendPhase.Enter, reverseStart[0].BlendPhase);
         Assert.Equal(BlendPhase.Enter, reverseStart[1].BlendPhase);
     }
@@ -184,12 +184,12 @@ public sealed class TimelineQueryTests
         var query = view.Query(handle);
 
         TransitionRecorder forward = default;
-        query.TraverseTransitions(new TimelineSpan(new TimelineId(0), 9, 14), ref forward);
+        query.TraverseTransitions(new TimelineSpan(new TimelineIndex(0), 9, 14), ref forward);
         Assert.Equal(1, forward.ClipEnter);
         Assert.Equal(1, forward.ClipExit);
 
         TransitionRecorder reverse = default;
-        query.TraverseTransitions(new TimelineSpan(new TimelineId(0), 15, 10), ref reverse);
+        query.TraverseTransitions(new TimelineSpan(new TimelineIndex(0), 15, 10), ref reverse);
         Assert.Equal(1, reverse.ClipEnter);
         Assert.Equal(1, reverse.ClipExit);
     }
@@ -220,7 +220,7 @@ public sealed class TimelineQueryTests
     }
 
     [Fact]
-    public void LoopTraversalOccurrenceTicksAreAbsolute()
+    public void LoopTraversalGlobalTicksAreAbsolute()
     {
         DatabaseBuilder builder = new();
         var timeline = builder.AddTimeline(new TimelineKey(5), 10, TimelineFlags.Loop);
@@ -241,19 +241,19 @@ public sealed class TimelineQueryTests
         OccurrenceRecorder single = default;
         query.TraverseTransitions(new TimelineSpan(timeline, 1, 3), ref single);
         Assert.Equal(1, single.Count);
-        Assert.Equal(2, single.FirstOccurrenceTick);
+        Assert.Equal(2, single.FirstGlobalTick);
         Assert.Equal(ClipPhase.Enter, single.FirstPhase);
 
         OccurrenceRecorder crossed = default;
         query.TraverseTransitions(new TimelineSpan(timeline, 9, 12), ref crossed);
         Assert.Equal(1, crossed.Count);
-        Assert.Equal(12, crossed.FirstOccurrenceTick);
+        Assert.Equal(12, crossed.FirstGlobalTick);
         Assert.Equal(ClipPhase.Enter, crossed.FirstPhase);
 
         OccurrenceRecorder rewind = default;
         query.TraverseTransitions(new TimelineSpan(timeline, 3, -2), ref rewind);
         Assert.Equal(1, rewind.Count);
-        Assert.Equal(2, rewind.FirstOccurrenceTick);
+        Assert.Equal(2, rewind.FirstGlobalTick);
         Assert.Equal(ClipPhase.Exit, rewind.FirstPhase);
     }
 
@@ -283,7 +283,7 @@ public sealed class TimelineQueryTests
         OccurrenceRecorder unknownTimeline = default;
         Assert.Equal(
             0,
-            query.TraverseTransitions(new TimelineSpan(new TimelineId(99), 0, 5), ref unknownTimeline));
+            query.TraverseTransitions(new TimelineSpan(new TimelineIndex(99), 0, 5), ref unknownTimeline));
         Assert.Equal(0, unknownTimeline.Count);
     }
 
@@ -314,7 +314,7 @@ public sealed class TimelineQueryTests
         Assert.True(a.Timelines.SequenceEqual(b.Timelines));
         Assert.True(a.TimelineLookup.SequenceEqual(b.TimelineLookup));
         Assert.True(a.Tracks.SequenceEqual(b.Tracks));
-        Assert.True(a.TrackData.SequenceEqual(b.TrackData));
+        Assert.True(a.TrackTemplate.SequenceEqual(b.TrackTemplate));
         Assert.True(a.Clips.SequenceEqual(b.Clips));
         Assert.True(a.Types.SequenceEqual(b.Types));
         Assert.True(a.Directory.SequenceEqual(b.Directory));
@@ -333,14 +333,14 @@ public sealed class TimelineQueryTests
         var view = db.AsView();
         var query = view.Query(handle);
         Span<TimelineCursor> cursors = stackalloc TimelineCursor[1];
-        cursors[0] = new TimelineCursor(new TimelineId(0), 12, TimelineDirection.Forward);
+        cursors[0] = new TimelineCursor(new TimelineIndex(0), 12, TimelineDirection.Forward);
         FrameSink sink = default;
 
-        for (var i = 0; i < 1024; i++) query.Visit(cursors, ref sink);
+        for (var i = 0; i < 1024; i++) query.VisitFrames(cursors, ref sink);
 
         var before = GC.GetAllocatedBytesForCurrentThread();
 
-        for (var i = 0; i < 100_000; i++) query.Visit(cursors, ref sink);
+        for (var i = 0; i < 100_000; i++) query.VisitFrames(cursors, ref sink);
 
         var after = GC.GetAllocatedBytesForCurrentThread();
         Assert.Equal(0L, after - before);
@@ -357,7 +357,7 @@ public sealed class TimelineQueryTests
         var handle = db.Resolve(TestTypes.Clip);
         var view = db.AsView();
         var query = view.Query(handle);
-        var track = query.Tracks(new TimelineId(0))[0];
+        var track = query.Tracks(new TimelineIndex(0))[0];
 
         var samples = query.Sample(in track, 12);
 
@@ -378,7 +378,7 @@ public sealed class TimelineQueryTests
         var handle = db.Resolve(TestTypes.Clip);
         var view = db.AsView();
         var query = view.Query(handle);
-        var track = query.Tracks(new TimelineId(0))[0];
+        var track = query.Tracks(new TimelineIndex(0))[0];
 
         var blend = query.Sample(in track, 4);
 
@@ -407,23 +407,23 @@ public sealed class TimelineQueryTests
         var handle = db.Resolve(TestTypes.Clip);
         var view = db.AsView();
         var query = view.Query(handle);
-        var track = query.Tracks(new TimelineId(0))[0];
+        var track = query.Tracks(new TimelineIndex(0))[0];
 
         SumVisitor sumVisitor = default;
         query.Sample(in track, 4, ref sumVisitor);
         Assert.Equal(2.0f, sumVisitor.Sum, 4);
 
         Span<TimelineCursor> cursors = stackalloc TimelineCursor[1];
-        cursors[0] = new TimelineCursor(new TimelineId(0), 4, TimelineDirection.Forward);
+        cursors[0] = new TimelineCursor(new TimelineIndex(0), 4, TimelineDirection.Forward);
         FrameSink sink = default;
-        query.Visit(cursors, ref sink);
+        query.VisitFrames(cursors, ref sink);
         Assert.Equal(2.0f, sink.Sum, 4);
 
         Assert.Equal(sumVisitor.Sum, sink.Sum, 4);
     }
 
     [Fact]
-    public void TrackDataExposesMode()
+    public void TrackTemplateExposesMode()
     {
         var exclusive = BuildSingleTrack(
             32,
@@ -434,14 +434,14 @@ public sealed class TimelineQueryTests
         var exclusiveHandle = exclusive.Resolve(TestTypes.Clip);
         var exclusiveView = exclusive.AsView();
         var exclusiveQuery = exclusiveView.Query(exclusiveHandle);
-        var exclusiveTrack = exclusiveQuery.Tracks(new TimelineId(0))[0];
-        Assert.Equal(TrackMode.Exclusive, exclusiveQuery.TrackData(in exclusiveTrack).Mode);
+        var exclusiveTrack = exclusiveQuery.Tracks(new TimelineIndex(0))[0];
+        Assert.Equal(TrackMode.Exclusive, exclusiveQuery.TrackTemplate(in exclusiveTrack).Mode);
 
         var crossFadeHandle = crossFade.Resolve(TestTypes.Clip);
         var crossFadeView = crossFade.AsView();
         var crossFadeQuery = crossFadeView.Query(crossFadeHandle);
-        var crossFadeTrack = crossFadeQuery.Tracks(new TimelineId(0))[0];
-        Assert.Equal(TrackMode.CrossFade, crossFadeQuery.TrackData(in crossFadeTrack).Mode);
+        var crossFadeTrack = crossFadeQuery.Tracks(new TimelineIndex(0))[0];
+        Assert.Equal(TrackMode.CrossFade, crossFadeQuery.TrackTemplate(in crossFadeTrack).Mode);
     }
 
     [Fact]
@@ -456,7 +456,7 @@ public sealed class TimelineQueryTests
         var exclusiveHandle = exclusive.Resolve(TestTypes.Clip);
         var exclusiveView = exclusive.AsView();
         var exclusiveQuery = exclusiveView.Query(exclusiveHandle);
-        var exclusiveTrack = exclusiveQuery.Tracks(new TimelineId(0))[0];
+        var exclusiveTrack = exclusiveQuery.Tracks(new TimelineIndex(0))[0];
         var exclusiveRef = exclusiveQuery.Track(in exclusiveTrack);
         Assert.Equal(TrackMode.Exclusive, exclusiveRef.Mode);
         Assert.Equal(0, exclusiveRef.Binding);
@@ -464,7 +464,7 @@ public sealed class TimelineQueryTests
         var crossFadeHandle = crossFade.Resolve(TestTypes.Clip);
         var crossFadeView = crossFade.AsView();
         var crossFadeQuery = crossFadeView.Query(crossFadeHandle);
-        var crossFadeTrack = crossFadeQuery.Tracks(new TimelineId(0))[0];
+        var crossFadeTrack = crossFadeQuery.Tracks(new TimelineIndex(0))[0];
         var crossFadeRef = crossFadeQuery.Track(in crossFadeTrack);
         Assert.Equal(TrackMode.CrossFade, crossFadeRef.Mode);
         Assert.Equal(0, crossFadeRef.Binding);
@@ -506,16 +506,16 @@ public sealed class TimelineQueryTests
         return builder.Build();
     }
 
-    private static ClipHit First(ClipFrameEnumerator frame)
+    private static ClipFrame First(ClipFrameEnumerator frame)
     {
-        Assert.True(frame.MoveNext(), "Expected one clip hit.");
+        Assert.True(frame.MoveNext(), "Expected one clip frame.");
 
         return frame.Current;
     }
 
-    private static ClipHit[] ReadFrame(ClipFrameEnumerator frame)
+    private static ClipFrame[] ReadFrame(ClipFrameEnumerator frame)
     {
-        List<ClipHit> result = [];
+        List<ClipFrame> result = [];
 
         while (frame.MoveNext()) result.Add(frame.Current);
 
@@ -526,9 +526,9 @@ public sealed class TimelineQueryTests
     {
         public float Sum;
 
-        public void Visit(in TrackInstance track, in ClipHit hit, in TestClip clip)
+        public void Visit(in TrackInstance track, in ClipFrame frame, in TestClip clip)
         {
-            Sum += clip.Value * hit.Weight;
+            Sum += clip.Value * frame.Weight;
         }
     }
 
