@@ -1,4 +1,6 @@
-namespace Iutq.Core;
+using Iutq.Core.Storage;
+
+namespace Iutq.Core.Querying;
 
 public interface IClipSampleVisitor<TClip> where TClip : unmanaged
 {

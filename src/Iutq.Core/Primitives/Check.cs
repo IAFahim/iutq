@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace Iutq.Core;
+namespace Iutq.Core.Primitives;
 
 // CA1512 would demand the .NET 8+ ThrowIf* helpers, which Unity's BCL lacks;
 // explicit throws keep this engine compilable when dropped into Unity.

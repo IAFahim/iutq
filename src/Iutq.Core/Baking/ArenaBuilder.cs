@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace Iutq.Core;
+using Iutq.Core.Primitives;
+
+namespace Iutq.Core.Baking;
 
 internal sealed class ArenaBuilder
 {

@@ -1,4 +1,4 @@
-namespace Iutq.Core;
+namespace Iutq.Core.Primitives;
 
 internal static class Fnv1A64
 {

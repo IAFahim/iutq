@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace Iutq.Core;
+namespace Iutq.Core.Primitives;
 
 public static class TimelineMath
 {

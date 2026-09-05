@@ -242,11 +242,17 @@ Measured on a 200-timeline / 600-track / 8,000-clip / 25,200-boundary database w
 ## Layout
 
 ```
-src/Iutq.Core         the engine
-tests/Iutq.Tests      xUnit semantic tests
-examples/Iutq.Demo    bake -> query demo
-bench/Iutq.Bench      BenchmarkDotNet harness
+src/Iutq.Core                 the engine
+  Primitives/                 enums, keys, handles, format caps, timeline math, check policy
+  Baking/                     clip authoring, DatabaseBuilder, payload interning
+  Storage/                    blob records, TimelineDatabase assembly/validation, DatabaseView
+  Querying/                   ClipQuery kernel, sample/frame results, visitor contracts
+tests/Iutq.Tests              xUnit semantic tests
+examples/Iutq.Demo            bake -> query demo
+bench/Iutq.Bench              BenchmarkDotNet harness
 ```
+
+Namespaces mirror the folders: `Iutq.Core.Primitives`, `Iutq.Core.Baking`, `Iutq.Core.Storage`, `Iutq.Core.Querying`. Dependency direction: Querying → Storage → Primitives, and Baking → Storage → Primitives; nothing references Baking.
 
 ## Benchmarks
 

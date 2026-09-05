@@ -3,7 +3,10 @@ using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
-using Iutq.Core;
+using Iutq.Core.Baking;
+using Iutq.Core.Primitives;
+using Iutq.Core.Querying;
+using Iutq.Core.Storage;
 using Perfolizer.Horology;
 
 namespace Iutq.Bench;

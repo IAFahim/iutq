@@ -1,5 +1,8 @@
 using System.Runtime.InteropServices;
-using Iutq.Core;
+using Iutq.Core.Baking;
+using Iutq.Core.Primitives;
+using Iutq.Core.Querying;
+using Iutq.Core.Storage;
 using Xunit;
 
 namespace Iutq.Tests;

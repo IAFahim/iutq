@@ -1,4 +1,6 @@
-namespace Iutq.Core;
+using Iutq.Core.Primitives;
+
+namespace Iutq.Core.Baking;
 
 public readonly record struct ClipDefinition<TClip>(int Start, int End, TClip Data, ClipEase Ease = ClipEase.Linear)
     where TClip : unmanaged;

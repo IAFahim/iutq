@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Iutq.Core.Primitives;
+using Iutq.Core.Storage;
 
-namespace Iutq.Core;
+namespace Iutq.Core.Querying;
 
 public readonly ref struct ClipQuery<TClip>
     where TClip : unmanaged
@@ -26,7 +28,7 @@ public readonly ref struct ClipQuery<TClip>
 
     /// <summary>
     ///     Directory lookup for an already-validated timeline id
-    ///     (<see cref="DatabaseView.TryGetTimeline" /> or the public
+    ///     (<see cref="Storage.DatabaseView.TryGetTimeline" /> or the public
     ///     <see cref="Tracks" /> performed the range check).
     ///     Directory contiguity is validated on load: index and slice
     ///     without re-checking bounds against the whole tracks section.
@@ -907,7 +909,6 @@ public ref struct ClipSampleEnumerator
         get => _index == 0 ? _first : _second;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
     {
         var next = _index + 1;
@@ -918,7 +919,6 @@ public ref struct ClipSampleEnumerator
         return true;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ClipSampleEnumerator GetEnumerator()
     {
         return this;
@@ -956,7 +956,6 @@ public ref struct ClipFrameEnumerator
         get => _index == 0 ? _first : _second;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
     {
         var next = _index + 1;
@@ -967,7 +966,6 @@ public ref struct ClipFrameEnumerator
         return true;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ClipFrameEnumerator GetEnumerator()
     {
         return this;
