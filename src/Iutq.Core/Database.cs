@@ -254,10 +254,13 @@ public sealed class TimelineDatabase
     {
         var view = AsView();
 
-        if (!view.TryResolve(type, out var handle))
-            throw new KeyNotFoundException($"Timeline clip type 0x{type.Key:X16} is not present in this database.");
+        if (view.TryResolve(type, out var handle))
+        {
+            return handle;
+        }
 
-        return handle;
+        Check.TypePresent(type.Key);
+        return default;
     }
 
     internal static byte[] Assemble(
@@ -486,23 +489,15 @@ public sealed class TimelineDatabase
         for (var timelineIndex = 0; timelineIndex < timelines.Length; timelineIndex++)
         {
             ref readonly var partition = ref directory[typeSlot * timelines.Length + timelineIndex];
-
             if (!RangeWithin(partition.TrackStart, partition.TrackCount, tracks.Length)) return false;
-
             if (partition.TrackCount == 0) continue;
-
             if (partition.TrackStart != trackCursor) return false;
-
-            for (var trackIndex = partition.TrackStart;
-                 trackIndex < partition.TrackStart + partition.TrackCount;
-                 trackIndex++)
+            
+            for (var index = partition.TrackStart; index < partition.TrackStart + partition.TrackCount; index++)
             {
-                ref readonly var instance = ref tracks[trackIndex];
-
+                ref readonly var instance = ref tracks[index];
                 if ((uint)instance.TrackTemplateId >= (uint)trackData.Length) return false;
-
                 ref readonly var data = ref trackData[instance.TrackTemplateId];
-
                 if (data.TypeKey != types[typeSlot].Key ||
                     maxEnds[instance.TrackTemplateId] > timelines[timelineIndex].Duration)
                     return false;
@@ -517,30 +512,20 @@ public sealed class TimelineDatabase
     private static bool ValidateTypes(ReadOnlySpan<TypeDescriptor> types)
     {
         ulong previous = 0;
-
         for (var i = 0; i < types.Length; i++)
         {
             ref readonly var type = ref types[i];
-
-            if (type.Key == 0 ||
-                type.Size <= 0 ||
-                (i > 0 && type.Key <= previous))
-                return false;
-
+            if (type.Key == 0 || type.Size <= 0 || (i > 0 && type.Key <= previous)) return false;
             previous = type.Key;
         }
-
         return true;
     }
 
     private static bool ValidateTimelines(ReadOnlySpan<TimelineHeader> timelines)
     {
         foreach (ref readonly var timeline in timelines)
-            if (timeline.Key == 0 ||
-                timeline.Duration <= 0 ||
-                ((byte)timeline.Flags & ~(byte)TimelineFlags.Loop) != 0)
+            if (timeline.Key == 0 || timeline.Duration <= 0 || ((byte)timeline.Flags & ~(byte)TimelineFlags.Loop) != 0)
                 return false;
-
         return true;
     }
 
@@ -555,9 +540,7 @@ public sealed class TimelineDatabase
             ref readonly var entry = ref lookup[i];
 
             if ((uint)entry.TimelineIndex >= (uint)timelines.Length ||
-                timelines[entry.TimelineIndex].Key != entry.Key ||
-                (i > 0 && entry.Key <= previous))
-                return false;
+                timelines[entry.TimelineIndex].Key != entry.Key || (i > 0 && entry.Key <= previous)) return false;
 
             previous = entry.Key;
         }
@@ -581,9 +564,7 @@ public sealed class TimelineDatabase
                 clip.Start < previousEnd ||
                 clip.DataOffset < 0 ||
                 clip.DataOffset > arenaLength - payloadSize ||
-                (byte)clip.Ease > (byte)ClipEase.CubicInOut)
-                return false;
-
+                (byte)clip.Ease > (byte)ClipEase.CubicInOut) return false;
             previousStart = clip.Start;
             previousEnd = clip.End;
         }
@@ -630,31 +611,17 @@ public sealed class TimelineDatabase
                 {
                     if (overlapEnd - overlapStart == 1)
                     {
-                        expected.Add(new TrackBoundary(
-                            overlapStart,
-                            a,
-                            b,
-                            BoundaryKind.BlendInstant));
+                        expected.Add(new TrackBoundary(overlapStart, a, b, BoundaryKind.BlendInstant));
                     }
                     else
                     {
-                        expected.Add(new TrackBoundary(
-                            overlapStart,
-                            a,
-                            b,
-                            BoundaryKind.BlendStart));
-                        expected.Add(new TrackBoundary(
-                            overlapEnd - 1,
-                            a,
-                            b,
-                            BoundaryKind.BlendEnd));
+                        expected.Add(new TrackBoundary(overlapStart, a, b, BoundaryKind.BlendStart));
+                        expected.Add(new TrackBoundary(overlapEnd - 1, a, b, BoundaryKind.BlendEnd));
                     }
                 }
 
-                if (clipA.End <= clipB.End)
-                    a++;
-                else
-                    b++;
+                if (clipA.End <= clipB.End) a++;
+                else b++;
             }
         }
 
@@ -690,9 +657,7 @@ public sealed class TimelineDatabase
     private static int ComputeMaxEnd(ReadOnlySpan<ClipEntry> clips)
     {
         var max = 0;
-
         foreach (ref readonly var clip in clips) max = Math.Max(max, clip.End);
-
         return max;
     }
 
@@ -706,14 +671,8 @@ public sealed class TimelineDatabase
             var mid = (lo + hi) >>> 1;
             var candidate = types[mid].Key;
 
-            if (key < candidate)
-            {
-                hi = mid - 1;
-            }
-            else if (key > candidate)
-            {
-                lo = mid + 1;
-            }
+            if (key < candidate) hi = mid - 1;
+            else if (key > candidate) lo = mid + 1;
             else
             {
                 slot = mid;
@@ -727,13 +686,10 @@ public sealed class TimelineDatabase
 
     private static bool RangeWithin(int start, int count, int length)
     {
-        return start >= 0 &&
-               count >= 0 &&
-               start <= length &&
-               count <= length - start;
+        return start >= 0 && count >= 0 && start <= length && count <= length - start;
     }
 
-    internal enum BlobError
+    private enum BlobError
     {
         None = 0,
         Truncated,
@@ -844,11 +800,13 @@ public readonly ref struct DatabaseView
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ClipQuery<TClip> Query<TClip>(ClipTypeHandle<TClip> handle)
-        where TClip : unmanaged
+    public ClipQuery<TClip> Query<TClip>(ClipTypeHandle<TClip> handle) where TClip : unmanaged
     {
         if (!handle.IsValid || (uint)handle.TypeSlot >= (uint)Types.Length)
-            throw new ArgumentOutOfRangeException(nameof(handle));
+        {
+            Check.HandleUsable(in handle);
+            return default;
+        }
 
         return new ClipQuery<TClip>(this, handle.TypeSlot);
     }
@@ -867,8 +825,7 @@ public readonly ref struct DatabaseView
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ref readonly T Payload<T>(int dataOffset)
-        where T : unmanaged
+    internal ref readonly T Payload<T>(int dataOffset) where T : unmanaged
     {
         ref var arena = ref MemoryMarshal.GetReference(Arena);
         return ref Unsafe.As<byte, T>(ref Unsafe.Add(ref arena, dataOffset));

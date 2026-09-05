@@ -101,7 +101,7 @@ public readonly struct ClipType<T>
 
     public ClipType(ulong key)
     {
-        ArgumentOutOfRangeException.ThrowIfZero(key);
+        Check.TypeKeyNonZero(key);
 
         Key = key;
     }
@@ -118,7 +118,7 @@ public readonly struct ClipTypeHandle<T>
 
     internal ClipTypeHandle(int typeSlot)
     {
-        _slotPlusOne = checked(typeSlot + 1);
+        _slotPlusOne = Check.SlotPlusOne(typeSlot);
     }
 
     internal int TypeSlot => _slotPlusOne - 1;

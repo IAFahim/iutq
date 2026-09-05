@@ -27,7 +27,11 @@ public sealed class DatabaseBuilder
     {
         if (key.Value == 0) throw new ArgumentOutOfRangeException(nameof(key));
 
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(duration);
+        // CA1512 would demand ThrowIfNegativeOrZero, which Unity's BCL lacks;
+        // explicit throws keep this file compilable when dropped into Unity.
+#pragma warning disable CA1512
+        if (duration <= 0) throw new ArgumentOutOfRangeException(nameof(duration));
+#pragma warning restore CA1512
 
         if (((byte)flags & ~(byte)TimelineFlags.Loop) != 0) throw new ArgumentOutOfRangeException(nameof(flags));
 
