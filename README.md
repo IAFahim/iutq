@@ -230,24 +230,24 @@ bench/Iutq.Bench      BenchmarkDotNet harness
 
 ## Benchmarks
 
-BenchmarkDotNet, .NET 10, Ryzen 5 8500G (`bench/Iutq.Bench`). Frame/Sample benchmarks include the per-frame setup (`AsView` + `Query` + `Tracks`):
+BenchmarkDotNet, .NET 10, Intel i9-14900K (`bench/Iutq.Bench`). Frame/Sample benchmarks include the per-frame setup (`AsView` + `Query` + `Tracks`). The bench's `GlobalSetup` verifies hand-computed outputs for every scenario before any measurement runs, so a perf run self-aborts on a semantic regression.
 
 | Method                   | Mean      | Allocated |
-|-------------------------- |----------:|----------:|
-| FrameExclusive           | 16.01 ns  | 0 B       |
-| FrameCrossFade           | 20.26 ns  | 0 B       |
-| SampleExclusive          | 15.96 ns  | 0 B       |
-| SampleCrossFade          | 19.48 ns  | 0 B       |
-| SampleFusedOneTrack      | 17.46 ns  | 0 B       |
-| SampleEightCursors       | 44.07 ns  | 0 B       |
-| VisitOneCursor           | 17.95 ns  | 0 B       |
-| VisitEightCursors        | 45.22 ns  | 0 B       |
-| TraverseForwardOneTick   | 37.56 ns  | 0 B       |
-| TraverseForwardFullLoop  | 49.66 ns  | 0 B       |
-| TraverseRewindTwentyFive | 48.45 ns  | 0 B       |
-| QuerySetupOnly           | 11.65 ns  | 0 B       |
+|--------------------------|----------:|----------:|
+| FrameExclusive           |  3.27 ns  | 0 B       |
+| FrameCrossFade           |  6.21 ns  | 0 B       |
+| SampleExclusive          |  2.89 ns  | 0 B       |
+| SampleCrossFade          |  5.49 ns  | 0 B       |
+| SampleFusedOneTrack      |  2.99 ns  | 0 B       |
+| SampleEightCursors       | 19.25 ns  | 0 B       |
+| VisitOneCursor           |  3.82 ns  | 0 B       |
+| VisitEightCursors        | 21.17 ns  | 0 B       |
+| TraverseForwardOneTick   |  5.39 ns  | 0 B       |
+| TraverseForwardFullLoop  |  7.79 ns  | 0 B       |
+| TraverseRewindTwentyFive |  8.07 ns  | 0 B       |
+| QuerySetupOnly           |  0.87 ns  | 0 B       |
 
-Same machine, V2 (`TimelineEngine`) comparison — steady-state loops with setup hoisted, best of 7, 20M ops, identical clip windows and payloads:
+Same machine, V2 (`TimelineEngine`) comparison — steady-state loops with setup hoisted, best of 7, 20M ops, identical clip windows and payloads, Ryzen 5 8500G:
 
 | scenario                              | V2 ns/op | V3 ns/op | V3/V2 |
 |--------------------------------------- |---------:|---------:|------:|
@@ -260,8 +260,8 @@ Read honestly:
 
 - The bare per-sample kernel is ~1.33x V2. V3 stages a `ClipHit`/`ClipSample` and lets the consuming system compute progress/ease/payload reads; V2 fuses search + ease + interpolation into one call returning the final value. That is the cost of "payload is data, behavior belongs to the system".
 - The whole-frame idiom is 31% faster than V2's full instance tick: the type handle is resolved once, the type-major directory is dense integer indexing, and there is no instance pool, no per-instance type-cache traffic and no clock ownership.
-- The weight-only Level-3 pass (`SampleEightCursors`, 44.07 ns) edges out the hit-carrying `VisitEightCursors` (45.22 ns) on the same cursor span — the level split pays without giving anything up.
-- Transition traversal is ~32 ns absolute per 64-tick looping span but ~3.4x V2's dedicated event rows: boundary rows carry clip indices and payload offsets (12 B) and blend emissions reference two payloads, versus V2's minimal event headers. Traversal is catch-up work, not a per-sample path.
+- The weight-only Level-3 pass (`SampleEightCursors`, 19.25 ns) edges out the hit-carrying `VisitEightCursors` (21.17 ns) on the same cursor span — the level split pays without giving anything up.
+- Transition traversal after the loop-cycle rework (no-division single-cycle fast path, linear scan for short boundary windows) sits at ~8 ns per 64-tick looping span: boundary rows carry clip indices and payload offsets (12 B) and blend emissions reference two payloads, versus V2's minimal event headers. Traversal is catch-up work, not a per-sample path.
 - Zero allocations in every engine, every scenario.
 
 ## Guarantees

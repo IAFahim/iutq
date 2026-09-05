@@ -55,6 +55,38 @@ public struct TransitionRecorder : IClipTransitionVisitor<TestClip>
     }
 }
 
+public struct OccurrenceRecorder : IClipTransitionVisitor<TestClip>
+{
+    public long FirstOccurrenceTick;
+    public long SecondOccurrenceTick;
+    public ClipPhase FirstPhase;
+    public int Count;
+
+    public void Clip(in TrackInstance track, in ClipTransition transition, in TestClip clip)
+    {
+        if (Count == 0)
+        {
+            FirstOccurrenceTick = transition.OccurrenceTick;
+            FirstPhase = transition.Phase;
+        }
+        else if (Count == 1)
+        {
+            SecondOccurrenceTick = transition.OccurrenceTick;
+        }
+
+        Count++;
+    }
+
+    public void Blend(
+        in TrackInstance track,
+        in BlendTransition transition,
+        in TestClip clipA,
+        in TestClip clipB)
+    {
+        Count++;
+    }
+}
+
 public sealed class TimelineQueryTests
 {
     [Fact]
@@ -187,6 +219,108 @@ public sealed class TimelineQueryTests
         query.TraverseTransitions(new TimelineSpan(timeline, 9, 10), ref recorder);
         Assert.Equal(1, recorder.ClipEnter);
         Assert.Equal(9, recorder.Value);
+    }
+
+    [Fact]
+    public void LoopTraversalOccurrenceTicksAreAbsolute()
+    {
+        DatabaseBuilder builder = new();
+        TimelineId timeline = builder.AddTimeline(new TimelineKey(5), 10, TimelineFlags.Loop);
+        TestClip value = new(4);
+
+        builder.AddTrack(
+            timeline,
+            TestTypes.Clip,
+            new BindingId(0),
+            TrackMode.Exclusive,
+            [Clip.Range(2, 6, in value)]);
+
+        TimelineDatabase db = builder.Build();
+        ClipHandle<TestClip> handle = db.Resolve(TestTypes.Clip);
+        DatabaseView view = db.AsView();
+        ClipQuery<TestClip> query = view.Query(handle);
+
+        OccurrenceRecorder single = default;
+        query.TraverseTransitions(new TimelineSpan(timeline, 1, 3), ref single);
+        Assert.Equal(1, single.Count);
+        Assert.Equal(2, single.FirstOccurrenceTick);
+        Assert.Equal(ClipPhase.Enter, single.FirstPhase);
+
+        OccurrenceRecorder crossed = default;
+        query.TraverseTransitions(new TimelineSpan(timeline, 9, 12), ref crossed);
+        Assert.Equal(1, crossed.Count);
+        Assert.Equal(12, crossed.FirstOccurrenceTick);
+        Assert.Equal(ClipPhase.Enter, crossed.FirstPhase);
+
+        OccurrenceRecorder rewind = default;
+        query.TraverseTransitions(new TimelineSpan(timeline, 3, -2), ref rewind);
+        Assert.Equal(1, rewind.Count);
+        Assert.Equal(2, rewind.FirstOccurrenceTick);
+        Assert.Equal(ClipPhase.Exit, rewind.FirstPhase);
+    }
+
+    [Fact]
+    public void TraverseIsTotalForDegenerateInputs()
+    {
+        DatabaseBuilder builder = new();
+        TimelineId timeline = builder.AddTimeline(new TimelineKey(6), 10);
+        TestClip value = new(2);
+
+        builder.AddTrack(
+            timeline,
+            TestTypes.Clip,
+            new BindingId(0),
+            TrackMode.Exclusive,
+            [Clip.Range(2, 6, in value)]);
+
+        TimelineDatabase db = builder.Build();
+        ClipHandle<TestClip> handle = db.Resolve(TestTypes.Clip);
+        DatabaseView view = db.AsView();
+        ClipQuery<TestClip> query = view.Query(handle);
+
+        OccurrenceRecorder sameTick = default;
+        Assert.Equal(0, query.TraverseTransitions(new TimelineSpan(timeline, 5, 5), ref sameTick));
+        Assert.Equal(0, sameTick.Count);
+
+        OccurrenceRecorder unknownTimeline = default;
+        Assert.Equal(
+            0,
+            query.TraverseTransitions(new TimelineSpan(new TimelineId(99), 0, 5), ref unknownTimeline));
+        Assert.Equal(0, unknownTimeline.Count);
+    }
+
+    [Fact]
+    public void BakeIsDeterministicAndBlobRoundTrips()
+    {
+        byte[] first = BuildCrossFade().ToArray();
+        byte[] second = BuildCrossFade().ToArray();
+        Assert.True(first.AsSpan().SequenceEqual(second));
+
+        TimelineDatabase loaded = TimelineDatabase.Load(first);
+        Assert.True(loaded.ToArray().AsSpan().SequenceEqual(first));
+
+        first[^1] ^= 0xFF;
+        Assert.True(loaded.ToArray().AsSpan().SequenceEqual(second));
+        Assert.Throws<InvalidDataException>(() => TimelineDatabase.Load(first));
+    }
+
+    [Fact]
+    public void LoadedViewSectionsMatchBuiltDatabase()
+    {
+        TimelineDatabase built = BuildCrossFade();
+        TimelineDatabase loaded = TimelineDatabase.Load(built.ToArray());
+
+        DatabaseView a = built.AsView();
+        DatabaseView b = loaded.AsView();
+
+        Assert.True(a.Timelines.SequenceEqual(b.Timelines));
+        Assert.True(a.TimelineLookup.SequenceEqual(b.TimelineLookup));
+        Assert.True(a.Tracks.SequenceEqual(b.Tracks));
+        Assert.True(a.TrackData.SequenceEqual(b.TrackData));
+        Assert.True(a.Clips.SequenceEqual(b.Clips));
+        Assert.True(a.Types.SequenceEqual(b.Types));
+        Assert.True(a.Directory.SequenceEqual(b.Directory));
+        Assert.True(a.Arena.SequenceEqual(b.Arena));
     }
 
     [Fact]

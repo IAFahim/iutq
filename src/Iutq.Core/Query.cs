@@ -9,6 +9,7 @@ public readonly ref struct ClipQuery<TClip>
     private readonly DatabaseView _db;
     private readonly int _directoryBase;
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ClipQuery(DatabaseView db, int typeSlot)
     {
         _db = db;
@@ -23,8 +24,25 @@ public readonly ref struct ClipQuery<TClip>
             return ReadOnlySpan<TrackInstance>.Empty;
         }
 
-        TypePartition partition = _db.Directory[_directoryBase + timelineId.Value];
-        return _db.Tracks.Slice(partition.TrackStart, partition.TrackCount);
+        return TracksCore(timelineId.Value);
+    }
+
+    /// <summary>
+    /// Directory lookup for an already-validated timeline id
+    /// (<see cref="DatabaseView.TryGetTimeline"/> or the public
+    /// <see cref="Tracks"/> performed the range check).
+    /// Directory contiguity is validated on load: index and slice
+    /// without re-checking bounds against the whole tracks section.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ReadOnlySpan<TrackInstance> TracksCore(int timelineId)
+    {
+        ref TypePartition directory = ref MemoryMarshal.GetReference(_db.Directory);
+        TypePartition partition = Unsafe.Add(ref directory, (nint)(uint)(_directoryBase + timelineId));
+        ref TrackInstance first = ref MemoryMarshal.GetReference(_db.Tracks);
+        return MemoryMarshal.CreateReadOnlySpan(
+            ref Unsafe.Add(ref first, (nint)(uint)partition.TrackStart),
+            partition.TrackCount);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -54,7 +72,7 @@ public readonly ref struct ClipQuery<TClip>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ClipSampleEnumerator Sample(in TrackInstance track, int tick)
     {
-        ref readonly TrackData data = ref _db.TrackData[track.TrackDataId];
+        ref readonly TrackData data = ref TrackDataRef(in track);
 
         return data.Mode == TrackMode.Exclusive
             ? SampleExclusive(in data, tick)
@@ -114,7 +132,7 @@ public readonly ref struct ClipQuery<TClip>
         int tick,
         TimelineDirection direction)
     {
-        ref readonly TrackData data = ref _db.TrackData[track.TrackDataId];
+        ref readonly TrackData data = ref TrackDataRef(in track);
 
         return data.Mode == TrackMode.Exclusive
             ? FrameExclusive(in data, tick, direction)
@@ -174,7 +192,7 @@ public readonly ref struct ClipQuery<TClip>
             return 0;
         }
 
-        ReadOnlySpan<TrackInstance> tracks = Tracks(span.Timeline);
+        ReadOnlySpan<TrackInstance> tracks = TracksCore(span.Timeline.Value);
 
         if (tracks.IsEmpty)
         {
@@ -208,7 +226,7 @@ public readonly ref struct ClipQuery<TClip>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ClipSampleEnumerator SampleExclusive(in TrackData data, int tick)
     {
-        ReadOnlySpan<ClipHeader> clips = _db.Clips.Slice(data.ClipStart, data.ClipCount);
+        ReadOnlySpan<ClipHeader> clips = ClipWindow(in data, 0, data.ClipCount);
         int index = ActiveClipIndex(clips, tick);
 
         if (index < 0)
@@ -216,16 +234,16 @@ public readonly ref struct ClipQuery<TClip>
             return default;
         }
 
-        return new ClipSampleEnumerator(new ClipSample(clips[index].DataOffset, 1f));
+        ref ClipHeader first = ref MemoryMarshal.GetReference(clips);
+        ref readonly ClipHeader clip = ref Unsafe.Add(ref first, (nint)(uint)index);
+        return new ClipSampleEnumerator(new ClipSample(clip.DataOffset, 1f));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ClipSampleEnumerator SampleCrossFade(in TrackData data, int tick)
     {
-        ReadOnlySpan<ClipHeader> laneA = _db.Clips.Slice(data.ClipStart, data.LaneSplit);
-        ReadOnlySpan<ClipHeader> laneB = _db.Clips.Slice(
-            data.ClipStart + data.LaneSplit,
-            data.ClipCount - data.LaneSplit);
+        ReadOnlySpan<ClipHeader> laneA = ClipWindow(in data, 0, data.LaneSplit);
+        ReadOnlySpan<ClipHeader> laneB = ClipWindow(in data, data.LaneSplit, data.ClipCount - data.LaneSplit);
 
         int indexA = ActiveClipIndex(laneA, tick);
         int indexB = ActiveClipIndex(laneB, tick);
@@ -235,18 +253,23 @@ public readonly ref struct ClipQuery<TClip>
             return default;
         }
 
+        ref ClipHeader firstA = ref MemoryMarshal.GetReference(laneA);
+        ref ClipHeader firstB = ref MemoryMarshal.GetReference(laneB);
+
         if (indexB < 0)
         {
-            return new ClipSampleEnumerator(new ClipSample(laneA[indexA].DataOffset, 1f));
+            return new ClipSampleEnumerator(new ClipSample(
+                Unsafe.Add(ref firstA, (nint)(uint)indexA).DataOffset, 1f));
         }
 
         if (indexA < 0)
         {
-            return new ClipSampleEnumerator(new ClipSample(laneB[indexB].DataOffset, 1f));
+            return new ClipSampleEnumerator(new ClipSample(
+                Unsafe.Add(ref firstB, (nint)(uint)indexB).DataOffset, 1f));
         }
 
-        ref readonly ClipHeader clipA = ref laneA[indexA];
-        ref readonly ClipHeader clipB = ref laneB[indexB];
+        ref readonly ClipHeader clipA = ref Unsafe.Add(ref firstA, (nint)(uint)indexA);
+        ref readonly ClipHeader clipB = ref Unsafe.Add(ref firstB, (nint)(uint)indexB);
         int blendStart = Math.Max(clipA.Start, clipB.Start);
         int blendEnd = Math.Min(clipA.End, clipB.End);
         float factor = TimelineMath.BlendFactor(tick, blendStart, blendEnd);
@@ -265,7 +288,7 @@ public readonly ref struct ClipQuery<TClip>
         int tick,
         TimelineDirection direction)
     {
-        ReadOnlySpan<ClipHeader> clips = _db.Clips.Slice(data.ClipStart, data.ClipCount);
+        ReadOnlySpan<ClipHeader> clips = ClipWindow(in data, 0, data.ClipCount);
         int index = ActiveClipIndex(clips, tick);
 
         if (index < 0)
@@ -273,7 +296,8 @@ public readonly ref struct ClipQuery<TClip>
             return default;
         }
 
-        ref readonly ClipHeader clip = ref clips[index];
+        ref ClipHeader first = ref MemoryMarshal.GetReference(clips);
+        ref readonly ClipHeader clip = ref Unsafe.Add(ref first, (nint)(uint)index);
         ClipHit hit = CreateHit(
             in clip,
             tick,
@@ -291,10 +315,8 @@ public readonly ref struct ClipQuery<TClip>
         int tick,
         TimelineDirection direction)
     {
-        ReadOnlySpan<ClipHeader> laneA = _db.Clips.Slice(data.ClipStart, data.LaneSplit);
-        ReadOnlySpan<ClipHeader> laneB = _db.Clips.Slice(
-            data.ClipStart + data.LaneSplit,
-            data.ClipCount - data.LaneSplit);
+        ReadOnlySpan<ClipHeader> laneA = ClipWindow(in data, 0, data.LaneSplit);
+        ReadOnlySpan<ClipHeader> laneB = ClipWindow(in data, data.LaneSplit, data.ClipCount - data.LaneSplit);
 
         int indexA = ActiveClipIndex(laneA, tick);
         int indexB = ActiveClipIndex(laneB, tick);
@@ -304,9 +326,12 @@ public readonly ref struct ClipQuery<TClip>
             return default;
         }
 
+        ref ClipHeader firstA = ref MemoryMarshal.GetReference(laneA);
+        ref ClipHeader firstB = ref MemoryMarshal.GetReference(laneB);
+
         if (indexB < 0)
         {
-            ref readonly ClipHeader clip = ref laneA[indexA];
+            ref readonly ClipHeader clip = ref Unsafe.Add(ref firstA, (nint)(uint)indexA);
             ClipHit hit = CreateHit(
                 in clip,
                 tick,
@@ -319,7 +344,7 @@ public readonly ref struct ClipQuery<TClip>
 
         if (indexA < 0)
         {
-            ref readonly ClipHeader clip = ref laneB[indexB];
+            ref readonly ClipHeader clip = ref Unsafe.Add(ref firstB, (nint)(uint)indexB);
             ClipHit hit = CreateHit(
                 in clip,
                 tick,
@@ -330,8 +355,8 @@ public readonly ref struct ClipQuery<TClip>
             return new ClipFrameEnumerator(in hit);
         }
 
-        ref readonly ClipHeader clipA = ref laneA[indexA];
-        ref readonly ClipHeader clipB = ref laneB[indexB];
+        ref readonly ClipHeader clipA = ref Unsafe.Add(ref firstA, (nint)(uint)indexA);
+        ref readonly ClipHeader clipB = ref Unsafe.Add(ref firstB, (nint)(uint)indexB);
         int blendStart = Math.Max(clipA.Start, clipB.Start);
         int blendEnd = Math.Min(clipA.End, clipB.End);
         float factor = TimelineMath.BlendFactor(tick, blendStart, blendEnd);
@@ -381,16 +406,41 @@ public readonly ref struct ClipQuery<TClip>
             weight,
             blendFactor);
 
+    /// <summary>
+    /// Track instances come from validated track sections: their
+    /// <see cref="TrackInstance.TrackDataId"/> is trusted by the kernel.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref readonly TrackData TrackDataRef(in TrackInstance track)
+    {
+        ref TrackData first = ref MemoryMarshal.GetReference(_db.TrackData);
+        return ref Unsafe.Add(ref first, (nint)(uint)track.TrackDataId);
+    }
+
+    /// <summary>
+    /// Clip windows are validated on load: build the span without re-checking
+    /// bounds against the whole clips section.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ReadOnlySpan<ClipHeader> ClipWindow(in TrackData data, int offset, int count)
+    {
+        ref ClipHeader first = ref MemoryMarshal.GetReference(_db.Clips);
+        return MemoryMarshal.CreateReadOnlySpan(
+            ref Unsafe.Add(ref first, (nint)(data.ClipStart + offset)),
+            count);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ActiveClipIndex(ReadOnlySpan<ClipHeader> clips, int tick)
     {
+        ref ClipHeader first = ref MemoryMarshal.GetReference(clips);
         int lo = 0;
         int hi = clips.Length - 1;
 
         while (lo <= hi)
         {
             int mid = (lo + hi) >>> 1;
-            ref readonly ClipHeader clip = ref clips[mid];
+            ref readonly ClipHeader clip = ref Unsafe.Add(ref first, (nint)(uint)mid);
 
             if (tick < clip.Start)
             {
@@ -440,31 +490,64 @@ public readonly ref struct ClipQuery<TClip>
                 ref visitor);
         }
 
-        long emitted = 0;
-        long firstCycle = FloorDiv(firstRaw, timeline.Duration);
-        long lastCycle = FloorDiv(lastRaw, timeline.Duration);
+        int duration = timeline.Duration;
 
-        for (long cycle = firstCycle;; cycle++)
+        if ((ulong)firstRaw < (ulong)duration && (ulong)lastRaw < (ulong)duration)
         {
-            int localStart = cycle == firstCycle ? FloorMod(firstRaw, timeline.Duration) : 0;
-            int localEnd = cycle == lastCycle ? FloorMod(lastRaw, timeline.Duration) : timeline.Duration - 1;
-
-            emitted += EmitRange(
+            return EmitRange(
                 tracks,
-                localStart,
-                localEnd,
-                cycle,
-                timeline.Duration,
+                (int)firstRaw,
+                (int)lastRaw,
+                0,
+                duration,
                 TimelineDirection.Forward,
                 ref visitor);
-
-            if (cycle == lastCycle)
-            {
-                break;
-            }
         }
 
-        return emitted;
+        long firstCycle = FloorDiv(firstRaw, duration);
+        long lastCycle = FloorDiv(lastRaw, duration);
+
+        if (firstCycle == lastCycle)
+        {
+            return EmitRange(
+                tracks,
+                LocalTick(firstRaw, firstCycle, duration),
+                LocalTick(lastRaw, lastCycle, duration),
+                firstCycle,
+                duration,
+                TimelineDirection.Forward,
+                ref visitor);
+        }
+
+        long emitted = EmitRange(
+            tracks,
+            LocalTick(firstRaw, firstCycle, duration),
+            duration - 1,
+            firstCycle,
+            duration,
+            TimelineDirection.Forward,
+            ref visitor);
+
+        for (long cycle = firstCycle + 1; cycle < lastCycle; cycle++)
+        {
+            emitted += EmitRange(
+                tracks,
+                0,
+                duration - 1,
+                cycle,
+                duration,
+                TimelineDirection.Forward,
+                ref visitor);
+        }
+
+        return emitted + EmitRange(
+            tracks,
+            0,
+            LocalTick(lastRaw, lastCycle, duration),
+            lastCycle,
+            duration,
+            TimelineDirection.Forward,
+            ref visitor);
     }
 
     private long TraverseReverse<TVisitor>(
@@ -498,31 +581,64 @@ public readonly ref struct ClipQuery<TClip>
                 ref visitor);
         }
 
-        long emitted = 0;
-        long lowCycle = FloorDiv(lowRaw, timeline.Duration);
-        long highCycle = FloorDiv(highRaw, timeline.Duration);
+        int duration = timeline.Duration;
 
-        for (long cycle = highCycle;; cycle--)
+        if ((ulong)lowRaw < (ulong)duration && (ulong)highRaw < (ulong)duration)
         {
-            int localLow = cycle == lowCycle ? FloorMod(lowRaw, timeline.Duration) : 0;
-            int localHigh = cycle == highCycle ? FloorMod(highRaw, timeline.Duration) : timeline.Duration - 1;
-
-            emitted += EmitRange(
+            return EmitRange(
                 tracks,
-                localLow,
-                localHigh,
-                cycle,
-                timeline.Duration,
+                (int)lowRaw,
+                (int)highRaw,
+                0,
+                duration,
                 TimelineDirection.Reverse,
                 ref visitor);
-
-            if (cycle == lowCycle)
-            {
-                break;
-            }
         }
 
-        return emitted;
+        long lowCycle = FloorDiv(lowRaw, duration);
+        long highCycle = FloorDiv(highRaw, duration);
+
+        if (lowCycle == highCycle)
+        {
+            return EmitRange(
+                tracks,
+                LocalTick(lowRaw, lowCycle, duration),
+                LocalTick(highRaw, highCycle, duration),
+                lowCycle,
+                duration,
+                TimelineDirection.Reverse,
+                ref visitor);
+        }
+
+        long emitted = EmitRange(
+            tracks,
+            0,
+            LocalTick(highRaw, highCycle, duration),
+            highCycle,
+            duration,
+            TimelineDirection.Reverse,
+            ref visitor);
+
+        for (long cycle = highCycle - 1; cycle > lowCycle; cycle--)
+        {
+            emitted += EmitRange(
+                tracks,
+                0,
+                duration - 1,
+                cycle,
+                duration,
+                TimelineDirection.Reverse,
+                ref visitor);
+        }
+
+        return emitted + EmitRange(
+            tracks,
+            LocalTick(lowRaw, lowCycle, duration),
+            duration - 1,
+            lowCycle,
+            duration,
+            TimelineDirection.Reverse,
+            ref visitor);
     }
 
     private long EmitRange<TVisitor>(
@@ -539,9 +655,10 @@ public readonly ref struct ClipQuery<TClip>
 
         foreach (ref readonly TrackInstance track in tracks)
         {
-            ref readonly TrackData data = ref _db.TrackData[track.TrackDataId];
-            ReadOnlySpan<BoundaryHeader> boundaries = _db.Boundaries.Slice(
-                data.BoundaryStart,
+            ref readonly TrackData data = ref TrackDataRef(in track);
+            ref BoundaryHeader boundariesFirst = ref MemoryMarshal.GetReference(_db.Boundaries);
+            ReadOnlySpan<BoundaryHeader> boundaries = MemoryMarshal.CreateReadOnlySpan(
+                ref Unsafe.Add(ref boundariesFirst, (nint)(uint)data.BoundaryStart),
                 data.BoundaryCount);
 
             emitted += direction == TimelineDirection.Forward
@@ -552,6 +669,7 @@ public readonly ref struct ClipQuery<TClip>
         return emitted;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private long EmitForwardTrack<TVisitor>(
         in TrackInstance track,
         in TrackData data,
@@ -563,12 +681,14 @@ public readonly ref struct ClipQuery<TClip>
         ref TVisitor visitor)
         where TVisitor : struct, IClipTransitionVisitor<TClip>
     {
+        ref BoundaryHeader first = ref MemoryMarshal.GetReference(boundaries);
+        int length = boundaries.Length;
         int index = LowerBound(boundaries, localLow);
         long emitted = 0;
 
-        for (; index < boundaries.Length; index++)
+        for (; index < length; index++)
         {
-            ref readonly BoundaryHeader boundary = ref boundaries[index];
+            ref readonly BoundaryHeader boundary = ref Unsafe.Add(ref first, (nint)(uint)index);
 
             if (boundary.Tick > localHigh)
             {
@@ -582,6 +702,7 @@ public readonly ref struct ClipQuery<TClip>
         return emitted;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private long EmitReverseTrack<TVisitor>(
         in TrackInstance track,
         in TrackData data,
@@ -593,12 +714,13 @@ public readonly ref struct ClipQuery<TClip>
         ref TVisitor visitor)
         where TVisitor : struct, IClipTransitionVisitor<TClip>
     {
+        ref BoundaryHeader first = ref MemoryMarshal.GetReference(boundaries);
         int index = UpperBound(boundaries, localHigh) - 1;
         long emitted = 0;
 
         for (; index >= 0; index--)
         {
-            ref readonly BoundaryHeader boundary = ref boundaries[index];
+            ref readonly BoundaryHeader boundary = ref Unsafe.Add(ref first, (nint)(uint)index);
 
             if (boundary.Tick < localLow)
             {
@@ -612,6 +734,7 @@ public readonly ref struct ClipQuery<TClip>
         return emitted;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EmitBoundary<TVisitor>(
         in TrackInstance track,
         in TrackData data,
@@ -623,7 +746,8 @@ public readonly ref struct ClipQuery<TClip>
         where TVisitor : struct, IClipTransitionVisitor<TClip>
     {
         long occurrenceTick = checked(cycle * duration + boundary.Tick);
-        ref readonly ClipHeader clipA = ref _db.Clips[data.ClipStart + boundary.ClipA];
+        ref ClipHeader clipBase = ref MemoryMarshal.GetReference(_db.Clips);
+        ref readonly ClipHeader clipA = ref Unsafe.Add(ref clipBase, (nint)(data.ClipStart + boundary.ClipA));
 
         switch (boundary.Kind)
         {
@@ -662,7 +786,7 @@ public readonly ref struct ClipQuery<TClip>
             case BoundaryKind.BlendLeft:
             case BoundaryKind.BlendRight:
             {
-                ref readonly ClipHeader clipB = ref _db.Clips[data.ClipStart + boundary.ClipB];
+                ref readonly ClipHeader clipB = ref Unsafe.Add(ref clipBase, (nint)(data.ClipStart + boundary.ClipB));
                 int start = Math.Max(clipA.Start, clipB.Start);
                 int end = Math.Min(clipA.End, clipB.End);
                 BlendPhase phase;
@@ -701,17 +825,39 @@ public readonly ref struct ClipQuery<TClip>
         }
     }
 
+    /// <summary>
+    /// Boundary windows are short for typical tracks (a few entries per clip):
+    /// scan linearly below the threshold, binary-search above it.
+    /// </summary>
+    private const int LinearBoundaryScanThreshold = 8;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int LowerBound(ReadOnlySpan<BoundaryHeader> boundaries, int tick)
     {
+        ref BoundaryHeader first = ref MemoryMarshal.GetReference(boundaries);
+        int length = boundaries.Length;
+
+        if (length <= LinearBoundaryScanThreshold)
+        {
+            for (int i = 0; i < length; i++)
+            {
+                if (Unsafe.Add(ref first, (nint)(uint)i).Tick >= tick)
+                {
+                    return i;
+                }
+            }
+
+            return length;
+        }
+
         int lo = 0;
-        int hi = boundaries.Length;
+        int hi = length;
 
         while (lo < hi)
         {
             int mid = (lo + hi) >>> 1;
 
-            if (boundaries[mid].Tick < tick)
+            if (Unsafe.Add(ref first, (nint)(uint)mid).Tick < tick)
             {
                 lo = mid + 1;
             }
@@ -727,14 +873,30 @@ public readonly ref struct ClipQuery<TClip>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int UpperBound(ReadOnlySpan<BoundaryHeader> boundaries, int tick)
     {
+        ref BoundaryHeader first = ref MemoryMarshal.GetReference(boundaries);
+        int length = boundaries.Length;
+
+        if (length <= LinearBoundaryScanThreshold)
+        {
+            for (int i = length - 1; i >= 0; i--)
+            {
+                if (Unsafe.Add(ref first, (nint)(uint)i).Tick <= tick)
+                {
+                    return i + 1;
+                }
+            }
+
+            return 0;
+        }
+
         int lo = 0;
-        int hi = boundaries.Length;
+        int hi = length;
 
         while (lo < hi)
         {
             int mid = (lo + hi) >>> 1;
 
-            if (boundaries[mid].Tick <= tick)
+            if (Unsafe.Add(ref first, (nint)(uint)mid).Tick <= tick)
             {
                 lo = mid + 1;
             }
@@ -748,18 +910,27 @@ public readonly ref struct ClipQuery<TClip>
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long FloorDiv(long value, int divisor)
-    {
-        long quotient = value / divisor;
-        long remainder = value % divisor;
-        return remainder < 0 ? quotient - 1 : quotient;
-    }
+    private static int LocalTick(long rawTick, long cycle, int duration) =>
+        (int)(rawTick - cycle * duration);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int FloorMod(long value, int divisor)
+    private static long FloorDiv(long value, int divisor)
     {
-        long remainder = value % divisor;
-        return (int)(remainder < 0 ? remainder + divisor : remainder);
+        if (value >= int.MinValue && value <= int.MaxValue)
+        {
+            int i = (int)value;
+            int quotient = i / divisor;
+
+            return i >= 0 || quotient * divisor == i
+                ? quotient
+                : quotient - 1;
+        }
+
+        long wideQuotient = value / divisor;
+
+        return value >= 0 || wideQuotient * divisor == value
+            ? wideQuotient
+            : wideQuotient - 1;
     }
 }
 

@@ -136,6 +136,108 @@ public class TimelineBenchmarks
         {
             _eightCursors[i] = new TimelineCursor(_timelineIds[i], 24, TimelineDirection.Forward);
         }
+
+        VerifyProtocol();
+    }
+
+    private void VerifyProtocol()
+    {
+        const float Tolerance = 1e-4f;
+
+        DatabaseView view = _dbExclusive.AsView();
+        ClipQuery<BenchClip> query = view.Query(_handleExclusive);
+        TrackInstance track = query.Tracks(_timelineIds[0])[0];
+
+        WeightedSum weighted = default;
+        ClipFrameEnumerator frame = query.Frame(in track, 24, TimelineDirection.Forward);
+        while (frame.MoveNext())
+        {
+            ref readonly BenchClip clip = ref query.Data(frame.Current.DataOffset);
+            weighted.A += clip.A * frame.Current.Weight;
+            weighted.B += clip.B * frame.Current.Weight;
+        }
+        AssertApprox("FrameExclusive", weighted.A + weighted.B, 1.5f, Tolerance);
+
+        DatabaseView crossView = _dbCrossFade.AsView();
+        ClipQuery<BenchClip> crossQuery = crossView.Query(_handleCrossFade);
+        TrackInstance crossTrack = crossQuery.Tracks(_crossFadeTimeline)[0];
+        weighted = default;
+        frame = crossQuery.Frame(in crossTrack, 18, TimelineDirection.Forward);
+        while (frame.MoveNext())
+        {
+            ref readonly BenchClip clip = ref crossQuery.Data(frame.Current.DataOffset);
+            weighted.A += clip.A * frame.Current.Weight;
+            weighted.B += clip.B * frame.Current.Weight;
+        }
+        AssertApprox("FrameCrossFade", weighted.A + weighted.B, 9.9f / 7f, Tolerance);
+
+        float sum = 0f;
+        ClipSampleEnumerator samples = query.Sample(in track, 24);
+        while (samples.MoveNext())
+        {
+            ClipSample sample = samples.Current;
+            ref readonly BenchClip clip = ref query.Data(sample.DataOffset);
+            sum += (clip.A + clip.B) * sample.Weight;
+        }
+        AssertApprox("SampleExclusive", sum, 1.5f, Tolerance);
+
+        sum = 0f;
+        samples = crossQuery.Sample(in crossTrack, 18);
+        while (samples.MoveNext())
+        {
+            ClipSample sample = samples.Current;
+            ref readonly BenchClip clip = ref crossQuery.Data(sample.DataOffset);
+            sum += (clip.A + clip.B) * sample.Weight;
+        }
+        AssertApprox("SampleCrossFade", sum, 9.9f / 7f, Tolerance);
+
+        SampleSum fused = default;
+        query.Sample(in track, 24, ref fused);
+        AssertApprox("SampleFusedOneTrack", fused.A + fused.B, 1.5f, Tolerance);
+
+        fused = default;
+        query.Sample(_eightCursors.AsSpan(), ref fused);
+        AssertApprox("SampleEightCursors", fused.A + fused.B, 292f, Tolerance);
+
+        weighted = default;
+        query.Visit(_singleCursor.AsSpan(), ref weighted);
+        AssertApprox("VisitOneCursor", weighted.A + weighted.B, 1.5f, Tolerance);
+
+        weighted = default;
+        query.Visit(_eightCursors.AsSpan(), ref weighted);
+        AssertApprox("VisitEightCursors", weighted.A + weighted.B, 292f, Tolerance);
+
+        DatabaseView pulseView = _dbPulse.AsView();
+        ClipQuery<BenchClip> pulseQuery = pulseView.Query(_handlePulse);
+        AssertEqual("TraverseForwardOneTick", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 4, 5)), 1);
+        AssertEqual("TraverseForwardFullLoop", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 0, 63)), 5);
+        AssertEqual("TraverseRewindTwentyFive", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 25, 5)), 4);
+
+        AssertEqual("QuerySetupOnly", query.Tracks(_timelineIds[0]).Length, 1);
+    }
+
+    private static long CountTransitions(ClipQuery<BenchClip> query, TimelineSpan span)
+    {
+        TransitionCounter counter = default;
+        return query.TraverseTransitions(in span, ref counter);
+    }
+
+    private static void AssertApprox(string scenario, float actual, float expected, float tolerance)
+    {
+        if (MathF.Abs(actual - expected) > tolerance)
+        {
+            throw new InvalidOperationException(
+                $"protocol verify failed: {scenario} produced {actual}, expected {expected}.");
+        }
+    }
+
+    private static void AssertEqual(string scenario, long actual, long expected)
+    {
+        if (actual != expected)
+        {
+            throw new InvalidOperationException(
+                $"protocol verify failed: {scenario} produced {actual}, expected {expected}.");
+        }
     }
 
     [Benchmark]
