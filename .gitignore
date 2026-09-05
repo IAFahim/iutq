@@ -3,3 +3,4 @@ obj/
 *.user
 .idea/
 BenchmarkDotNet.Artifacts/
+bench/Iutq.Bench/Generated/

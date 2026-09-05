@@ -1,11 +1,30 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <OutputType>Exe</OutputType>
+        <!-- Frozen kernels use pinned pointers and Unsafe.Add (no bounds checks). -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+        <CompilerGeneratedFilesOutputPath>Generated</CompilerGeneratedFilesOutputPath>
     </PropertyGroup>
     <ItemGroup>
         <PackageReference Include="BenchmarkDotNet" Version="0.15.8"/>
     </ItemGroup>
     <ItemGroup>
         <ProjectReference Include="..\..\src\Iutq.Core\Iutq.Core.csproj"/>
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\..\generators\Iutq.Waffle.Generator\Iutq.Waffle.Generator.csproj"
+                          OutputItemType="Analyzer"
+                          ReferenceOutputAssembly="false"/>
+    </ItemGroup>
+    <ItemGroup>
+        <!-- Emitted frozen sources live on disk for review; the compiler already
+             gets them from the generator pipeline. Exclude the copies. -->
+        <Compile Remove="Generated/**/*.cs"/>
+    </ItemGroup>
+    <ItemGroup>
+        <AdditionalFiles Include="Timelines.iutq"/>
+        <AdditionalFiles Include="CrossFade.iutq"/>
+        <AdditionalFiles Include="Pulse.iutq"/>
     </ItemGroup>
 </Project>

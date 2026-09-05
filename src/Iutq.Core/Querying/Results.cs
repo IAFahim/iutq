@@ -86,7 +86,8 @@ public readonly struct ClipTransition
     public readonly ClipPhase Phase;
     public readonly int DataOffset;
 
-    internal ClipTransition(
+    /// <summary>Public so source-generated frozen kernels can construct transitions directly.</summary>
+    public ClipTransition(
         long occurrenceTick,
         int tick,
         TimelineDirection direction,
@@ -112,7 +113,8 @@ public readonly struct BlendTransition
     public readonly int DataOffsetB;
     public readonly float Factor;
 
-    internal BlendTransition(
+    /// <summary>Public so source-generated frozen kernels can construct transitions directly.</summary>
+    public BlendTransition(
         long occurrenceTick,
         int tick,
         TimelineDirection direction,
