@@ -11,7 +11,7 @@ public sealed class DatabaseBuilder
     private readonly Dictionary<ulong, List<ClipSlice>> _clipSliceBuckets = [];
     private readonly HashSet<ulong> _timelineKeys = [];
     private readonly List<TimelineDraft> _timelines = [];
-    private readonly List<TrackTemplate> _trackData = [];
+    private readonly List<TemplateDraft> _trackData = [];
 
     private readonly Dictionary<(ulong TypeKey, TrackMode Mode, int ClipStart, int ClipCount, int LaneSplit), int>
         _trackDataIndex = [];
@@ -35,6 +35,15 @@ public sealed class DatabaseBuilder
 
         if (((byte)flags & ~(byte)TimelineFlags.Loop) != 0) throw new ArgumentOutOfRangeException(nameof(flags));
 
+        if (duration > Format.MaxTimelineDuration)
+            throw new ArgumentOutOfRangeException(
+                nameof(duration),
+                $"Timeline duration {duration} exceeds the blob v2 cap {Format.MaxTimelineDuration} ticks.");
+
+        if (_timelines.Count == Format.MaxTimelines)
+            throw new InvalidOperationException(
+                $"iutq blob v2 cap exceeded: at most {Format.MaxTimelines} timelines per database.");
+
         if (!_timelineKeys.Add(key.Value))
             throw new ArgumentException($"Duplicate timeline key 0x{key.Value:X16}.", nameof(key));
 
@@ -55,7 +64,10 @@ public sealed class DatabaseBuilder
 
         if (clips.IsEmpty) throw new ArgumentException("Track must contain at least one clip.", nameof(clips));
 
-        if (binding.Value < 0) throw new ArgumentOutOfRangeException(nameof(binding));
+        if (binding.Value < 0 || binding.Value > Format.MaxBinding)
+            throw new ArgumentOutOfRangeException(
+                nameof(binding),
+                $"Binding {binding.Value} exceeds the blob v2 cap {Format.MaxBinding}.");
 
         if (mode != TrackMode.Exclusive && mode != TrackMode.CrossFade)
             throw new ArgumentOutOfRangeException(nameof(mode));
@@ -98,6 +110,7 @@ public sealed class DatabaseBuilder
 
     public TimelineDatabase Build()
     {
+        CheckBuildCaps();
         var types = CollectTypes();
         var typeSlots = CreateTypeSlots(types);
 
@@ -117,29 +130,43 @@ public sealed class DatabaseBuilder
         var timelines = new TimelineHeader[_timelines.Count];
         var lookup = new TimelineLookupEntry[_timelines.Count];
         var tracks = new TrackInstance[orderedTracks.Count];
+        var templates = new TrackTemplate[_trackData.Count];
         var directory = new TrackSpan[checked(types.Length * _timelines.Count)];
 
         for (var i = 0; i < _timelines.Count; i++)
         {
             var timeline = _timelines[i];
-            timelines[i] = new TimelineHeader(timeline.Key, timeline.Duration, timeline.Flags);
-            lookup[i] = new TimelineLookupEntry(timeline.Key, i);
+            timelines[i] = new TimelineHeader((ushort)timeline.Duration, timeline.Flags);
+            lookup[i] = new TimelineLookupEntry(timeline.Key, (ushort)i);
         }
 
         Array.Sort(lookup, static (a, b) => a.Key.CompareTo(b.Key));
 
+        for (var i = 0; i < _trackData.Count; i++)
+        {
+            var draft = _trackData[i];
+            templates[i] = new TrackTemplate(
+                (ushort)typeSlots[draft.TypeKey],
+                draft.ClipStart,
+                draft.ClipCount,
+                draft.LaneSplit,
+                draft.BoundaryStart,
+                draft.BoundaryCount,
+                draft.Mode);
+        }
+
         for (var i = 0; i < orderedTracks.Count; i++)
         {
             var staged = orderedTracks[i];
-            tracks[i] = new TrackInstance(staged.Binding, staged.TrackTemplateId);
+            tracks[i] = new TrackInstance((ushort)staged.Binding, (ushort)staged.TrackTemplateId);
 
             var typeSlot = typeSlots[staged.TypeKey];
             var directoryIndex = checked(typeSlot * _timelines.Count + staged.TimelineIndex);
             var partition = directory[directoryIndex];
 
             directory[directoryIndex] = partition.TrackCount == 0
-                ? new TrackSpan(i, 1)
-                : new TrackSpan(partition.TrackStart, checked(partition.TrackCount + 1));
+                ? new TrackSpan((ushort)i, 1)
+                : new TrackSpan(partition.TrackStart, checked((ushort)(partition.TrackCount + 1)));
         }
 
         return TimelineDatabase.Create(
@@ -147,12 +174,30 @@ public sealed class DatabaseBuilder
                 timelines,
                 lookup,
                 tracks,
-                [.. _trackData],
+                templates,
                 [.. _clipStorage],
                 [.. _boundaryStorage],
                 types,
                 directory,
                 _arena.Build()));
+    }
+
+    private void CheckBuildCaps()
+    {
+        if (_timelines.Count > Format.MaxTimelines ||
+            _tracks.Count > Format.MaxTracks ||
+            _trackData.Count > Format.MaxTrackTemplates ||
+            _clipStorage.Count > Format.MaxClips ||
+            _boundaryStorage.Count > Format.MaxBoundaries ||
+            _typeOwners.Count > Format.MaxTypes)
+            throw new InvalidOperationException(
+                "iutq blob v2 cap exceeded: " +
+                $"timelines {_timelines.Count}/{Format.MaxTimelines}, " +
+                $"tracks {_tracks.Count}/{Format.MaxTracks}, " +
+                $"templates {_trackData.Count}/{Format.MaxTrackTemplates}, " +
+                $"clips {_clipStorage.Count}/{Format.MaxClips}, " +
+                $"boundaries {_boundaryStorage.Count}/{Format.MaxBoundaries}, " +
+                $"types {_typeOwners.Count}/{Format.MaxTypes}.");
     }
 
     private void RegisterType<TClip>(ClipType<TClip> type)
@@ -186,7 +231,7 @@ public sealed class DatabaseBuilder
         var result = new TypeDescriptor[_typeOwners.Count];
         var index = 0;
 
-        foreach (var pair in _typeOwners) result[index++] = new TypeDescriptor(pair.Key, pair.Value.Size);
+        foreach (var pair in _typeOwners) result[index++] = new TypeDescriptor(pair.Key, (ushort)pair.Value.Size);
 
         Array.Sort(result, static (a, b) => a.Key.CompareTo(b.Key));
         return result;
@@ -278,7 +323,11 @@ public sealed class DatabaseBuilder
     {
         var data = definition.Data;
         var dataOffset = _arena.Intern(in data);
-        return new ClipEntry(definition.Start, definition.End, dataOffset, definition.Ease);
+        return new ClipEntry(
+            (ushort)definition.Start,
+            (ushort)definition.End,
+            checked((ushort)(dataOffset / Format.PayloadUnit)),
+            definition.Ease);
     }
 
     private int InternClipEntrys(ClipEntry[] headers)
@@ -325,13 +374,13 @@ public sealed class DatabaseBuilder
         _boundaryStorage.AddRange(boundaries);
 
         var id = _trackData.Count;
-        _trackData.Add(new TrackTemplate(
+        _trackData.Add(new TemplateDraft(
             typeKey,
-            clipStart,
-            clipCount,
-            laneSplit,
-            boundaryStart,
-            boundaries.Length,
+            (ushort)clipStart,
+            (ushort)clipCount,
+            (ushort)laneSplit,
+            (ushort)boundaryStart,
+            (ushort)boundaries.Length,
             mode));
         _trackDataIndex.Add(key, id);
         return id;
@@ -350,12 +399,13 @@ public sealed class DatabaseBuilder
 
             if (clip.Duration == 1)
             {
-                result.Add(new TrackBoundary(clip.Start, i, -1, BoundaryKind.ClipInstant));
+                result.Add(new TrackBoundary(clip.Start, (ushort)i, TrackBoundary.NoClip, BoundaryKind.ClipInstant));
             }
             else
             {
-                result.Add(new TrackBoundary(clip.Start, i, -1, BoundaryKind.ClipStart));
-                result.Add(new TrackBoundary(clip.End - 1, i, -1, BoundaryKind.ClipEnd));
+                result.Add(new TrackBoundary(clip.Start, (ushort)i, TrackBoundary.NoClip, BoundaryKind.ClipStart));
+                result.Add(new TrackBoundary(
+                    (ushort)(clip.End - 1), (ushort)i, TrackBoundary.NoClip, BoundaryKind.ClipEnd));
             }
         }
 
@@ -375,12 +425,12 @@ public sealed class DatabaseBuilder
                 {
                     if (end - start == 1)
                     {
-                        result.Add(new TrackBoundary(start, a, b, BoundaryKind.BlendInstant));
+                        result.Add(new TrackBoundary(start, (ushort)a, (ushort)b, BoundaryKind.BlendInstant));
                     }
                     else
                     {
-                        result.Add(new TrackBoundary(start, a, b, BoundaryKind.BlendStart));
-                        result.Add(new TrackBoundary(end - 1, a, b, BoundaryKind.BlendEnd));
+                        result.Add(new TrackBoundary(start, (ushort)a, (ushort)b, BoundaryKind.BlendStart));
+                        result.Add(new TrackBoundary((ushort)(end - 1), (ushort)a, (ushort)b, BoundaryKind.BlendEnd));
                     }
                 }
 
@@ -408,6 +458,15 @@ public sealed class DatabaseBuilder
         ulong Key,
         int Duration,
         TimelineFlags Flags);
+
+    private readonly record struct TemplateDraft(
+        ulong TypeKey,
+        ushort ClipStart,
+        ushort ClipCount,
+        ushort LaneSplit,
+        ushort BoundaryStart,
+        ushort BoundaryCount,
+        TrackMode Mode);
 
     private sealed record StagedTrack(
         int TimelineIndex,

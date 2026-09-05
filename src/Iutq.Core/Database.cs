@@ -8,26 +8,26 @@ internal readonly struct BlobHeader(
     uint magic,
     ushort version,
     ushort reserved,
-    int timelineCount,
-    int trackCount,
-    int trackDataCount,
-    int clipCount,
-    int boundaryCount,
-    int typeCount,
-    int arenaBytes,
-    ulong payloadHash)
+    ushort timelineCount,
+    ushort trackCount,
+    ushort trackDataCount,
+    ushort clipCount,
+    ushort boundaryCount,
+    ushort typeCount,
+    ushort arenaUnits,
+    uint payloadHash)
 {
     public readonly uint Magic = magic;
     public readonly ushort Version = version;
     public readonly ushort Reserved = reserved;
-    public readonly int TimelineCount = timelineCount;
-    public readonly int TrackCount = trackCount;
-    public readonly int TrackTemplateCount = trackDataCount;
-    public readonly int ClipCount = clipCount;
-    public readonly int BoundaryCount = boundaryCount;
-    public readonly int TypeCount = typeCount;
-    public readonly int ArenaBytes = arenaBytes;
-    public readonly ulong PayloadHash = payloadHash;
+    public readonly ushort TimelineCount = timelineCount;
+    public readonly ushort TrackCount = trackCount;
+    public readonly ushort TrackTemplateCount = trackDataCount;
+    public readonly ushort ClipCount = clipCount;
+    public readonly ushort BoundaryCount = boundaryCount;
+    public readonly ushort TypeCount = typeCount;
+    public readonly ushort ArenaUnits = arenaUnits;
+    public readonly uint PayloadHash = payloadHash;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -113,7 +113,7 @@ internal readonly unsafe struct DatabaseSections
             header.ClipCount,
             header.BoundaryCount,
             header.TypeCount,
-            header.ArenaBytes);
+            header.ArenaUnits * Format.PayloadUnit);
 
         return new DatabaseSections(
             SectionPtr<TimelineHeader>(span, layout.Timelines, header.TimelineCount), header.TimelineCount,
@@ -125,7 +125,8 @@ internal readonly unsafe struct DatabaseSections
             SectionPtr<TypeDescriptor>(span, layout.Types, header.TypeCount), header.TypeCount,
             SectionPtr<TrackSpan>(span, layout.Directory, checked(header.TimelineCount * header.TypeCount)),
             checked(header.TimelineCount * header.TypeCount),
-            SectionPtr<byte>(span, layout.Arena, header.ArenaBytes), header.ArenaBytes);
+            SectionPtr<byte>(span, layout.Arena, header.ArenaUnits * Format.PayloadUnit),
+            header.ArenaUnits * Format.PayloadUnit);
     }
 
     private static nint SectionPtr<T>(ReadOnlySpan<byte> blob, int offset, int count) where T : unmanaged
@@ -199,7 +200,7 @@ internal readonly record struct SectionLayout(
 public sealed class TimelineDatabase
 {
     private const uint Magic = 0x49555451;
-    private const ushort Version = 1;
+    private const ushort Version = 2;
 
     private readonly byte[] _blob;
     private readonly DatabaseSections _sections;
@@ -289,13 +290,13 @@ public sealed class TimelineDatabase
             Magic,
             Version,
             0,
-            timelines.Length,
-            tracks.Length,
-            trackData.Length,
-            clips.Length,
-            boundaries.Length,
-            types.Length,
-            arena.Length,
+            checked((ushort)timelines.Length),
+            checked((ushort)tracks.Length),
+            checked((ushort)trackData.Length),
+            checked((ushort)clips.Length),
+            checked((ushort)boundaries.Length),
+            checked((ushort)types.Length),
+            checked((ushort)(arena.Length / Format.PayloadUnit)),
             0);
 
         MemoryMarshal.Write(blob.AsSpan(), in initial);
@@ -314,14 +315,14 @@ public sealed class TimelineDatabase
             Magic,
             Version,
             0,
-            timelines.Length,
-            tracks.Length,
-            trackData.Length,
-            clips.Length,
-            boundaries.Length,
-            types.Length,
-            arena.Length,
-            hash);
+            checked((ushort)timelines.Length),
+            checked((ushort)tracks.Length),
+            checked((ushort)trackData.Length),
+            checked((ushort)clips.Length),
+            checked((ushort)boundaries.Length),
+            checked((ushort)types.Length),
+            checked((ushort)(arena.Length / Format.PayloadUnit)),
+            (uint)hash);
 
         MemoryMarshal.Write(blob.AsSpan(), in final);
         return blob;
@@ -343,7 +344,7 @@ public sealed class TimelineDatabase
             header.ClipCount,
             header.BoundaryCount,
             header.TypeCount,
-            header.ArenaBytes);
+            header.ArenaUnits * Format.PayloadUnit);
     }
 
     private static string DescribeError(BlobError error)
@@ -373,15 +374,7 @@ public sealed class TimelineDatabase
 
             var header = MemoryMarshal.Read<BlobHeader>(span);
 
-            if (header.Magic != Magic ||
-                header.Version != Version ||
-                header.TimelineCount < 0 ||
-                header.TrackCount < 0 ||
-                header.TrackTemplateCount < 0 ||
-                header.ClipCount < 0 ||
-                header.BoundaryCount < 0 ||
-                header.TypeCount < 0 ||
-                header.ArenaBytes < 0)
+            if (header.Magic != Magic || header.Version != Version)
             {
                 error = BlobError.Header;
                 return false;
@@ -395,7 +388,7 @@ public sealed class TimelineDatabase
                 return false;
             }
 
-            if (Fnv1A64.Hash(span[Unsafe.SizeOf<BlobHeader>()..]) != header.PayloadHash)
+            if ((uint)Fnv1A64.Hash(span[Unsafe.SizeOf<BlobHeader>()..]) != header.PayloadHash)
             {
                 error = BlobError.Hash;
                 return false;
@@ -449,9 +442,9 @@ public sealed class TimelineDatabase
         var directory = MemoryMarshal.Cast<byte, TrackSpan>(
             blob.Slice(layout.Directory,
                 checked(checked(header.TimelineCount * header.TypeCount) * Unsafe.SizeOf<TrackSpan>())));
-        var arena = blob.Slice(layout.Arena, header.ArenaBytes);
+        var arena = blob.Slice(layout.Arena, header.ArenaUnits * Format.PayloadUnit);
 
-        if (!ValidateTypes(types) || !ValidateTimelines(timelines) || !ValidateLookup(timelines, lookup)) return false;
+        if (!ValidateTypes(types) || !ValidateTimelines(timelines) || !ValidateLookup(lookup)) return false;
 
         var maxEnds = new int[trackData.Length];
 
@@ -462,17 +455,17 @@ public sealed class TimelineDatabase
             if ((data.Mode != TrackMode.Exclusive && data.Mode != TrackMode.CrossFade) ||
                 !RangeWithin(data.ClipStart, data.ClipCount, clips.Length) ||
                 !RangeWithin(data.BoundaryStart, data.BoundaryCount, boundaries.Length) ||
-                data.LaneSplit < 0 ||
                 data.LaneSplit > data.ClipCount ||
-                !TryFindType(types, data.TypeKey, out var typeSlot))
+                data.TypeSlot >= types.Length)
                 return false;
 
             if (data.Mode == TrackMode.Exclusive && data.LaneSplit != data.ClipCount) return false;
 
             var window = clips.Slice(data.ClipStart, data.ClipCount);
+            var payloadSize = types[data.TypeSlot].Size;
 
-            if (!ValidateLane(window[..data.LaneSplit], types[typeSlot].Size, arena.Length) ||
-                !ValidateLane(window[data.LaneSplit..], types[typeSlot].Size, arena.Length) ||
+            if (!ValidateLane(window[..data.LaneSplit], payloadSize, arena.Length) ||
+                !ValidateLane(window[data.LaneSplit..], payloadSize, arena.Length) ||
                 !ValidateBoundaries(
                     boundaries.Slice(data.BoundaryStart, data.BoundaryCount),
                     window,
@@ -498,7 +491,7 @@ public sealed class TimelineDatabase
                 ref readonly var instance = ref tracks[index];
                 if ((uint)instance.TrackTemplateId >= (uint)trackData.Length) return false;
                 ref readonly var data = ref trackData[instance.TrackTemplateId];
-                if (data.TypeKey != types[typeSlot].Key ||
+                if (data.TypeSlot != typeSlot ||
                     maxEnds[instance.TrackTemplateId] > timelines[timelineIndex].Duration)
                     return false;
             }
@@ -515,7 +508,7 @@ public sealed class TimelineDatabase
         for (var i = 0; i < types.Length; i++)
         {
             ref readonly var type = ref types[i];
-            if (type.Key == 0 || type.Size <= 0 || (i > 0 && type.Key <= previous)) return false;
+            if (type.Key == 0 || type.Size == 0 || (i > 0 && type.Key <= previous)) return false;
             previous = type.Key;
         }
         return true;
@@ -524,24 +517,26 @@ public sealed class TimelineDatabase
     private static bool ValidateTimelines(ReadOnlySpan<TimelineHeader> timelines)
     {
         foreach (ref readonly var timeline in timelines)
-            if (timeline.Key == 0 || timeline.Duration <= 0 || ((byte)timeline.Flags & ~(byte)TimelineFlags.Loop) != 0)
+            if (timeline.Duration == 0 || ((byte)timeline.Flags & ~(byte)TimelineFlags.Loop) != 0)
                 return false;
         return true;
     }
 
-    private static bool ValidateLookup(
-        ReadOnlySpan<TimelineHeader> timelines,
-        ReadOnlySpan<TimelineLookupEntry> lookup)
+    private static bool ValidateLookup(ReadOnlySpan<TimelineLookupEntry> lookup)
     {
+        var seen = new bool[lookup.Length];
         ulong previous = 0;
 
         for (var i = 0; i < lookup.Length; i++)
         {
             ref readonly var entry = ref lookup[i];
 
-            if ((uint)entry.TimelineIndex >= (uint)timelines.Length ||
-                timelines[entry.TimelineIndex].Key != entry.Key || (i > 0 && entry.Key <= previous)) return false;
+            if (entry.Key == 0 ||
+                (uint)entry.TimelineIndex >= (uint)lookup.Length ||
+                seen[entry.TimelineIndex] ||
+                (i > 0 && entry.Key <= previous)) return false;
 
+            seen[entry.TimelineIndex] = true;
             previous = entry.Key;
         }
 
@@ -558,12 +553,10 @@ public sealed class TimelineDatabase
 
         foreach (ref readonly var clip in clips)
         {
-            if (clip.Start < 0 ||
-                clip.End <= clip.Start ||
+            if (clip.End <= clip.Start ||
                 clip.Start < previousStart ||
                 clip.Start < previousEnd ||
-                clip.DataOffset < 0 ||
-                clip.DataOffset > arenaLength - payloadSize ||
+                clip.DataOffset * Format.PayloadUnit > arenaLength - payloadSize ||
                 (byte)clip.Ease > (byte)ClipEase.CubicInOut) return false;
             previousStart = clip.Start;
             previousEnd = clip.End;
@@ -586,12 +579,13 @@ public sealed class TimelineDatabase
 
             if (clip.Duration == 1)
             {
-                expected.Add(new TrackBoundary(clip.Start, i, -1, BoundaryKind.ClipInstant));
+                expected.Add(new TrackBoundary(clip.Start, (ushort)i, TrackBoundary.NoClip, BoundaryKind.ClipInstant));
             }
             else
             {
-                expected.Add(new TrackBoundary(clip.Start, i, -1, BoundaryKind.ClipStart));
-                expected.Add(new TrackBoundary(clip.End - 1, i, -1, BoundaryKind.ClipEnd));
+                expected.Add(new TrackBoundary(clip.Start, (ushort)i, TrackBoundary.NoClip, BoundaryKind.ClipStart));
+                expected.Add(new TrackBoundary(
+                    (ushort)(clip.End - 1), (ushort)i, TrackBoundary.NoClip, BoundaryKind.ClipEnd));
             }
         }
 
@@ -611,12 +605,13 @@ public sealed class TimelineDatabase
                 {
                     if (overlapEnd - overlapStart == 1)
                     {
-                        expected.Add(new TrackBoundary(overlapStart, a, b, BoundaryKind.BlendInstant));
+                        expected.Add(new TrackBoundary(overlapStart, (ushort)a, (ushort)b, BoundaryKind.BlendInstant));
                     }
                     else
                     {
-                        expected.Add(new TrackBoundary(overlapStart, a, b, BoundaryKind.BlendStart));
-                        expected.Add(new TrackBoundary(overlapEnd - 1, a, b, BoundaryKind.BlendEnd));
+                        expected.Add(new TrackBoundary(overlapStart, (ushort)a, (ushort)b, BoundaryKind.BlendStart));
+                        expected.Add(new TrackBoundary(
+                            (ushort)(overlapEnd - 1), (ushort)a, (ushort)b, BoundaryKind.BlendEnd));
                     }
                 }
 
@@ -659,29 +654,6 @@ public sealed class TimelineDatabase
         var max = 0;
         foreach (ref readonly var clip in clips) max = Math.Max(max, clip.End);
         return max;
-    }
-
-    private static bool TryFindType(ReadOnlySpan<TypeDescriptor> types, ulong key, out int slot)
-    {
-        var lo = 0;
-        var hi = types.Length - 1;
-
-        while (lo <= hi)
-        {
-            var mid = (lo + hi) >>> 1;
-            var candidate = types[mid].Key;
-
-            if (key < candidate) hi = mid - 1;
-            else if (key > candidate) lo = mid + 1;
-            else
-            {
-                slot = mid;
-                return true;
-            }
-        }
-
-        slot = -1;
-        return false;
     }
 
     private static bool RangeWithin(int start, int count, int length)
@@ -825,6 +797,6 @@ public readonly ref struct DatabaseView
     internal ref readonly T Payload<T>(int dataOffset) where T : unmanaged
     {
         ref var arena = ref MemoryMarshal.GetReference(Arena);
-        return ref Unsafe.As<byte, T>(ref Unsafe.Add(ref arena, dataOffset));
+        return ref Unsafe.As<byte, T>(ref Unsafe.Add(ref arena, dataOffset * Format.PayloadUnit));
     }
 }

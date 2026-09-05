@@ -470,6 +470,53 @@ public sealed class TimelineQueryTests
         Assert.Equal(0, crossFadeRef.Binding);
     }
 
+    [Fact]
+    public void MaxWidthAuthoringRoundTrips()
+    {
+        DatabaseBuilder builder = new();
+        var timeline = builder.AddTimeline(new TimelineKey(0xA11CE), Format.MaxTimelineDuration);
+        builder.AddTrack(
+            timeline,
+            TestTypes.Clip,
+            new BindingId(Format.MaxBinding),
+            TrackMode.Exclusive,
+            [Clip.Range(0, Format.MaxTimelineDuration, new TestClip(7))]);
+
+        var db = builder.Build();
+        var loaded = TimelineDatabase.Load(db.ToArray());
+
+        var view = loaded.AsView();
+        Assert.Equal(Format.MaxTimelineDuration, view.Timelines[0].Duration);
+        Assert.True(view.TryResolve(new TimelineKey(0xA11CE), out var resolved));
+        Assert.Equal(timeline, resolved);
+
+        var query = view.Query(loaded.Resolve(TestTypes.Clip));
+        var track = query.Tracks(timeline)[0];
+        Assert.Equal(Format.MaxBinding, track.Binding);
+
+        var samples = query.Sample(in track, Format.MaxTimelineDuration - 1);
+        Assert.True(samples.MoveNext());
+        Assert.Equal(7, query.Data(samples.Current.DataOffset).Value);
+        Assert.Equal(1f, samples.Current.Weight);
+    }
+
+    [Fact]
+    public void BlobV2RejectsOversizedAuthoring()
+    {
+        DatabaseBuilder builder = new();
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => builder.AddTimeline(new TimelineKey(0x1), Format.MaxTimelineDuration + 1));
+
+        var timeline = builder.AddTimeline(new TimelineKey(0x2), 64);
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => builder.AddTrack(
+                timeline,
+                TestTypes.Clip,
+                new BindingId(Format.MaxBinding + 1),
+                TrackMode.Exclusive,
+                [Clip.Range(0, 64, new TestClip(1))]));
+    }
+
     private static TimelineDatabase BuildSingleTrack(
         int duration,
         TrackMode mode,

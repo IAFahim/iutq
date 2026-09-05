@@ -60,6 +60,28 @@ internal enum BoundaryKind : byte
     ClipEnd = 5
 }
 
+/// <summary>
+///     Hard caps of blob format v2. Every count and index is a 16-bit field,
+///     ticks are 16-bit, and payload offsets address the arena in 4-byte units.
+///     Raising a cap means widening the field and bumping the blob version;
+///     the runtime structs (TimelineIndex, ClipFrame, ...) stay 32/64-bit.
+/// </summary>
+public static class Format
+{
+    /// <summary>Payload arena addressing granularity in bytes.</summary>
+    public const int PayloadUnit = 4;
+
+    public const int MaxTimelines = ushort.MaxValue;
+    public const int MaxTracks = ushort.MaxValue;
+    public const int MaxTrackTemplates = ushort.MaxValue;
+    public const int MaxClips = ushort.MaxValue;
+    public const int MaxBoundaries = ushort.MaxValue;
+    public const int MaxTypes = ushort.MaxValue;
+    public const int MaxTimelineDuration = ushort.MaxValue;
+    public const int MaxBinding = ushort.MaxValue;
+    public const int MaxPayloadBytes = ushort.MaxValue * PayloadUnit;
+}
+
 public readonly record struct TimelineKey(ulong Value);
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
@@ -159,20 +181,18 @@ public readonly struct TimelineSpan
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct TimelineHeader : IEquatable<TimelineHeader>
 {
-    public readonly ulong Key;
-    public readonly int Duration;
+    public readonly ushort Duration;
     public readonly TimelineFlags Flags;
 
-    public TimelineHeader(ulong key, int duration, TimelineFlags flags)
+    public TimelineHeader(ushort duration, TimelineFlags flags)
     {
-        Key = key;
         Duration = duration;
         Flags = flags;
     }
 
     public bool Equals(TimelineHeader other)
     {
-        return Key == other.Key && Duration == other.Duration && Flags == other.Flags;
+        return Duration == other.Duration && Flags == other.Flags;
     }
 
     public override bool Equals(object? obj)
@@ -192,7 +212,7 @@ public readonly struct TimelineHeader : IEquatable<TimelineHeader>
 
     public override int GetHashCode()
     {
-        return HashCode.Combine(Key, Duration, Flags);
+        return HashCode.Combine(Duration, Flags);
     }
 }
 
@@ -200,9 +220,9 @@ public readonly struct TimelineHeader : IEquatable<TimelineHeader>
 public readonly struct TimelineLookupEntry : IEquatable<TimelineLookupEntry>
 {
     public readonly ulong Key;
-    public readonly int TimelineIndex;
+    public readonly ushort TimelineIndex;
 
-    public TimelineLookupEntry(ulong key, int timelineIndex)
+    public TimelineLookupEntry(ulong key, ushort timelineIndex)
     {
         Key = key;
         TimelineIndex = timelineIndex;
@@ -237,13 +257,13 @@ public readonly struct TimelineLookupEntry : IEquatable<TimelineLookupEntry>
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct TrackInstance : IEquatable<TrackInstance>
 {
-    public readonly int Binding;
-    public readonly int TrackTemplateId;
+    public readonly ushort Binding;
+    public readonly ushort TrackTemplateId;
 
-    public TrackInstance(int binding, int trackDataId)
+    public TrackInstance(ushort binding, ushort trackTemplateId)
     {
         Binding = binding;
-        TrackTemplateId = trackDataId;
+        TrackTemplateId = trackTemplateId;
     }
 
     public bool Equals(TrackInstance other)
@@ -275,24 +295,24 @@ public readonly struct TrackInstance : IEquatable<TrackInstance>
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct TrackTemplate : IEquatable<TrackTemplate>
 {
-    public readonly ulong TypeKey;
-    public readonly int ClipStart;
-    public readonly int ClipCount;
-    public readonly int LaneSplit;
-    public readonly int BoundaryStart;
-    public readonly int BoundaryCount;
+    public readonly ushort TypeSlot;
+    public readonly ushort ClipStart;
+    public readonly ushort ClipCount;
+    public readonly ushort LaneSplit;
+    public readonly ushort BoundaryStart;
+    public readonly ushort BoundaryCount;
     public readonly TrackMode Mode;
 
     public TrackTemplate(
-        ulong typeKey,
-        int clipStart,
-        int clipCount,
-        int laneSplit,
-        int boundaryStart,
-        int boundaryCount,
+        ushort typeSlot,
+        ushort clipStart,
+        ushort clipCount,
+        ushort laneSplit,
+        ushort boundaryStart,
+        ushort boundaryCount,
         TrackMode mode)
     {
-        TypeKey = typeKey;
+        TypeSlot = typeSlot;
         ClipStart = clipStart;
         ClipCount = clipCount;
         LaneSplit = laneSplit;
@@ -303,7 +323,7 @@ public readonly struct TrackTemplate : IEquatable<TrackTemplate>
 
     public bool Equals(TrackTemplate other)
     {
-        return TypeKey == other.TypeKey &&
+        return TypeSlot == other.TypeSlot &&
                ClipStart == other.ClipStart &&
                ClipCount == other.ClipCount &&
                LaneSplit == other.LaneSplit &&
@@ -329,7 +349,7 @@ public readonly struct TrackTemplate : IEquatable<TrackTemplate>
 
     public override int GetHashCode()
     {
-        return HashCode.Combine(TypeKey, ClipStart, ClipCount, LaneSplit, BoundaryStart, BoundaryCount, Mode);
+        return HashCode.Combine(TypeSlot, ClipStart, ClipCount, LaneSplit, BoundaryStart, BoundaryCount, Mode);
     }
 }
 
@@ -353,12 +373,14 @@ public readonly ref struct TrackRef
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct ClipEntry : IEquatable<ClipEntry>
 {
-    public readonly int Start;
-    public readonly int End;
-    public readonly int DataOffset;
+    public readonly ushort Start;
+    public readonly ushort End;
+
+    /// <summary>Payload arena offset in <see cref="Format.PayloadUnit" /> byte units.</summary>
+    public readonly ushort DataOffset;
     public readonly ClipEase Ease;
 
-    public ClipEntry(int start, int end, int dataOffset, ClipEase ease)
+    public ClipEntry(ushort start, ushort end, ushort dataOffset, ClipEase ease)
     {
         Start = start;
         End = end;
@@ -397,12 +419,15 @@ public readonly struct ClipEntry : IEquatable<ClipEntry>
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 internal readonly struct TrackBoundary : IEquatable<TrackBoundary>
 {
-    public readonly int Tick;
-    public readonly int ClipA;
-    public readonly int ClipB;
+    /// <summary>Sentinel for clip-only boundaries; also outside the valid clip index range by one.</summary>
+    internal const ushort NoClip = ushort.MaxValue;
+
+    public readonly ushort Tick;
+    public readonly ushort ClipA;
+    public readonly ushort ClipB;
     public readonly BoundaryKind Kind;
 
-    public TrackBoundary(int tick, int clipA, int clipB, BoundaryKind kind)
+    public TrackBoundary(ushort tick, ushort clipA, ushort clipB, BoundaryKind kind)
     {
         Tick = tick;
         ClipA = clipA;
@@ -440,9 +465,9 @@ internal readonly struct TrackBoundary : IEquatable<TrackBoundary>
 public readonly struct TypeDescriptor : IEquatable<TypeDescriptor>
 {
     public readonly ulong Key;
-    public readonly int Size;
+    public readonly ushort Size;
 
-    public TypeDescriptor(ulong key, int size)
+    public TypeDescriptor(ulong key, ushort size)
     {
         Key = key;
         Size = size;
@@ -477,10 +502,10 @@ public readonly struct TypeDescriptor : IEquatable<TypeDescriptor>
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct TrackSpan : IEquatable<TrackSpan>
 {
-    public readonly int TrackStart;
-    public readonly int TrackCount;
+    public readonly ushort TrackStart;
+    public readonly ushort TrackCount;
 
-    public TrackSpan(int trackStart, int trackCount)
+    public TrackSpan(ushort trackStart, ushort trackCount)
     {
         TrackStart = trackStart;
         TrackCount = trackCount;

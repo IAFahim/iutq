@@ -60,7 +60,7 @@ TrackInstance          per-placement state only
         |
         v
 TrackTemplate              interned shared content
-  TypeKey
+  TypeSlot
   Clip window
   Lane split
   Mode
@@ -73,7 +73,7 @@ TrackTemplate              interned shared content
         +----> interned payload arena
 ```
 
-Structural deduplication: 10,000 enemies playing the same attack share one interned clip window, one `TrackTemplate` and one set of payloads. Each pays only a 8-byte `TrackInstance` row.
+Structural deduplication: 10,000 enemies playing the same attack share one interned clip window, one `TrackTemplate` and one set of payloads. Each pays only a 4-byte `TrackInstance` row.
 
 ## Lifecycle semantics
 
@@ -132,7 +132,7 @@ TimelineDatabase database = builder.Build();
 
 Bake-time work: payload interning, clip-window interning, `TrackTemplate` interning, deterministic type/timeline partitioning, pairwise crossfade validation, lifecycle/blend boundary baking, blob assembly, structural validation and payload hashing. `Build()` runs the same full validator as `Load()`; after construction the database is proof that the invariants hold and the query kernel trusts it.
 
-`TimelineDatabase.Load(ReadOnlySpan<byte>)` re-validates from scratch: magic `IUTQ` (`0x49555451`), blob format version, FNV-1a 64 payload hash, section layout consistency, sorted lookup/types, in-bounds clip windows, lane monotonicity, boundary windows re-derived from the clips they index, and directory contiguity. The runtime never redoes any of it.
+`TimelineDatabase.Load(ReadOnlySpan<byte>)` re-validates from scratch: magic `IUTQ` (`0x49555451`), blob format version, 32-bit FNV-1a payload hash, section layout consistency, sorted lookup/types, in-bounds clip windows, lane monotonicity, boundary windows re-derived from the clips they index, and directory contiguity. The runtime never redoes any of it.
 
 ## Queries — three levels
 
@@ -216,8 +216,28 @@ EventHeader                        replaced by TrackBoundary
 InstancePool / TimelineInstance    caller-owned TimelineCursor
 PlaybackRate / TimelineClock       gameplay/ECS owns rate and local ticks
 static TypeSlotCache               explicit ClipTypeHandle, dense directory
-byte/ushort count ceilings         natural int indexing; ceiling is the blob
+int/ulong blob fields              blob v2: 16-bit counts, ticks and indices; payload offsets in 4-byte units
 ```
+
+## Blob format v2 and limits
+
+Every persisted field uses the narrowest atomic width (1, 2 or 4 bytes — odd widths would break the fixed-stride pointer reads the query kernel is built on). Runtime structs (`TimelineIndex`, `ClipFrame`, `ClipTransition`, ...) stay 32/64-bit; only the blob narrowed.
+
+| struct              | v1 → v2 (bytes) |
+|---------------------|-----------------|
+| BlobHeader          | 44 → 28         |
+| TimelineHeader      | 16 → 4          |
+| TimelineLookupEntry | 16 → 12         |
+| TrackInstance       | 8 → 4           |
+| TrackTemplate       | 32 → 14         |
+| ClipEntry           | 16 → 8          |
+| TrackBoundary       | 16 → 8          |
+| TypeDescriptor      | 16 → 12         |
+| TrackSpan           | 8 → 4           |
+
+Hard caps live in `Iutq.Core.Format` and the baker rejects exceeding them with named errors: 65,535 timelines / tracks / track templates / clips / boundaries / types per database, 65,535 ticks per timeline, bindings `0..65,535`, and a 256 KB payload arena (16-bit offsets in 4-byte units). The payload hash is truncated to 32 bits. A v1 blob is rejected with `IUTQ1002` (bad version); raising a cap means widening the field and bumping the version.
+
+Measured on a 200-timeline / 600-track / 8,000-clip / 25,200-boundary database with unique payloads: 595 KB → 316 KB (−47%). Structural savings are largest for long timelines (header 16 → 4 B) and interned templates (32 → 14 B); payload bytes are untouched and still dominate content-heavy blobs.
 
 ## Layout
 
@@ -234,18 +254,18 @@ BenchmarkDotNet, .NET 10, Intel i9-14900K (`bench/Iutq.Bench`). Frame/Sample ben
 
 | Method                   | Mean      | Allocated |
 |--------------------------|----------:|----------:|
-| FrameExclusive           |  3.27 ns  | 0 B       |
-| FrameCrossFade           |  6.21 ns  | 0 B       |
-| SampleExclusive          |  2.89 ns  | 0 B       |
-| SampleCrossFade          |  5.49 ns  | 0 B       |
-| SampleFusedOneTrack      |  2.99 ns  | 0 B       |
-| SampleEightCursors       | 19.25 ns  | 0 B       |
-| VisitOneCursor           |  3.82 ns  | 0 B       |
-| VisitEightCursors        | 21.17 ns  | 0 B       |
-| TraverseForwardOneTick   |  5.39 ns  | 0 B       |
-| TraverseForwardFullLoop  |  7.79 ns  | 0 B       |
-| TraverseRewindTwentyFive |  8.07 ns  | 0 B       |
-| QuerySetupOnly           |  0.87 ns  | 0 B       |
+| FrameExclusive           |  3.49 ns  | 0 B       |
+| FrameCrossFade           |  5.81 ns  | 0 B       |
+| SampleExclusive          |  3.04 ns  | 0 B       |
+| SampleCrossFade          |  5.95 ns  | 0 B       |
+| SampleFusedOneTrack      |  3.05 ns  | 0 B       |
+| SampleEightCursors       | 20.33 ns  | 0 B       |
+| VisitOneCursor           |  3.94 ns  | 0 B       |
+| VisitEightCursors        | 21.56 ns  | 0 B       |
+| TraverseForwardOneTick   |  5.70 ns  | 0 B       |
+| TraverseForwardFullLoop  |  8.38 ns  | 0 B       |
+| TraverseRewindTwentyFive |  8.33 ns  | 0 B       |
+| QuerySetupOnly           |  0.97 ns  | 0 B       |
 
 Same machine, V2 (`TimelineEngine`) comparison — steady-state loops with setup hoisted, best of 7, 20M ops, identical clip windows and payloads, Ryzen 5 8500G:
 
