@@ -113,6 +113,20 @@ public sealed class DatabaseBuilder
 
     public TimelineDatabase Build()
     {
+        return Build(false);
+    }
+
+    /// <summary>
+    ///     Bakes the database. With <paramref name="enableFastLookup" /> the
+    ///     builder additionally emits per-template tick-to-clip LUTs, boundary
+    ///     prefix tables and baked crossfade blend factors into an optional
+    ///     fast-lookup section, trading blob size for O(1) sampling and
+    ///     windowed traversal. Templates that exceed an area's 65,535-entry
+    ///     cap, or that are shared across timelines of different durations,
+    ///     silently fall back to the searched path.
+    /// </summary>
+    public TimelineDatabase Build(bool enableFastLookup)
+    {
         CheckBuildCaps();
         var types = CollectTypes();
         var typeSlots = CreateTypeSlots(types);
@@ -182,7 +196,231 @@ public sealed class DatabaseBuilder
                 [.. _boundaryStorage],
                 types,
                 directory,
-                _arena.Build()));
+                _arena.Build(),
+                enableFastLookup ? BuildFastSection() : null));
+    }
+
+    private byte[]? BuildFastSection()
+    {
+        if (_trackData.Count == 0) return null;
+
+        // 0 = no owning timeline seen yet, -1 = template shared across
+        // timelines of different durations (structure must then stay searched).
+        var durations = new int[_trackData.Count];
+
+        foreach (var staged in _tracks)
+        {
+            var duration = _timelines[staged.TimelineIndex].Duration;
+            var known = durations[staged.TrackTemplateId];
+            durations[staged.TrackTemplateId] = known == 0 ? duration : known == duration ? known : -1;
+        }
+
+        const int MaxAreaEntries = ushort.MaxValue;
+
+        // Below these sizes the searched path is already a short comparison
+        // chain / linear scan over one cache line; a LUT indirection only adds
+        // dependent loads. Mirrors the source-generated kernel's thresholds.
+        const int ClipLutThreshold = 8;
+        const int PrefixThreshold = 8;
+
+        List<byte> lut8 = [];
+        List<ushort> lut16 = [];
+        List<ushort> prefix = [];
+        List<float> factors = [];
+        var descriptors = new TrackFastData[_trackData.Count];
+        var clipSpan = CollectionsMarshal.AsSpan(_clipStorage);
+        var boundarySpan = CollectionsMarshal.AsSpan(_boundaryStorage);
+
+        for (var i = 0; i < _trackData.Count; i++)
+        {
+            var draft = _trackData[i];
+            var duration = durations[i];
+            var lut8Mark = lut8.Count;
+            var lut16Mark = lut16.Count;
+            var prefixMark = prefix.Count;
+            var factorMark = factors.Count;
+
+            byte width = 0;
+            ushort lutStart = 0;
+            ushort lutCount = 0;
+            ushort prefixStart = 0;
+            ushort prefixCount = 0;
+            ushort factorStart = 0;
+
+            var crossFade = draft.Mode == TrackMode.CrossFade;
+            var slotsPerTick = crossFade ? 2 : 1;
+            var laneMax = crossFade
+                ? Math.Max(draft.LaneSplit, draft.ClipCount - draft.LaneSplit)
+                : draft.ClipCount;
+            var lutWanted = laneMax > ClipLutThreshold && duration > 0 && duration <= 2048;
+
+            if (lutWanted &&
+                lut16.Count + (long)slotsPerTick * duration <= MaxAreaEntries &&
+                (!crossFade || factors.Count + duration <= MaxAreaEntries))
+            {
+                var window = clipSpan.Slice(draft.ClipStart, draft.ClipCount);
+                var narrow = duration <= 256 && draft.ClipCount <= 254 &&
+                             lut8.Count + (long)slotsPerTick * duration <= MaxAreaEntries;
+
+                var filled = true;
+
+                for (var tick = 0; tick < duration && filled; tick++)
+                {
+                    int indexA;
+                    int indexB;
+
+                    if (!crossFade)
+                    {
+                        indexA = FindActiveClip(window, tick);
+                        indexB = -1;
+                    }
+                    else
+                    {
+                        var laneA = window[..draft.LaneSplit];
+                        var laneB = window[draft.LaneSplit..];
+                        indexA = FindActiveClip(laneA, tick);
+                        indexB = FindActiveClip(laneB, tick);
+
+                        // Lane-local index must become a template-window index.
+                        if (indexB >= 0) indexB += draft.LaneSplit;
+                    }
+
+                    var entryA = (ushort)(indexA + 1);
+                    var entryB = (ushort)(indexB + 1);
+
+                    if (narrow && (entryA > byte.MaxValue || entryB > byte.MaxValue))
+                    {
+                        filled = false;
+                        break;
+                    }
+
+                    if (crossFade)
+                    {
+                        float factor = 0f;
+
+                        if (indexA >= 0 && indexB >= 0)
+                        {
+                            ref readonly var clipA = ref window[indexA];
+                            ref readonly var clipB = ref window[indexB];
+                            factor = TimelineMath.BlendFactor(
+                                tick,
+                                Math.Max(clipA.Start, clipB.Start),
+                                Math.Min(clipA.End, clipB.End));
+                        }
+
+                        factors.Add(factor);
+                    }
+
+                    // Exclusive tracks occupy one slot per tick; crossfade
+                    // tracks store the lane pair.
+                    if (narrow)
+                    {
+                        lut8.Add((byte)entryA);
+                        if (crossFade) lut8.Add((byte)entryB);
+                    }
+                    else
+                    {
+                        lut16.Add(entryA);
+                        if (crossFade) lut16.Add(entryB);
+                    }
+                }
+
+                if (filled)
+                {
+                    width = (narrow, crossFade) switch
+                    {
+                        (true, false) => 1,
+                        (false, false) => 2,
+                        (true, true) => 3,
+                        _ => 4
+                    };
+                    lutStart = narrow ? (ushort)lut8Mark : (ushort)lut16Mark;
+                    lutCount = (ushort)duration;
+                    factorStart = (ushort)factorMark;
+                }
+            }
+
+            // Prefix tables are independent of LUTs: long boundary windows pay
+            // for a tick-indexed window even when sampling stays searched.
+            if (draft.BoundaryCount > PrefixThreshold && duration > 0 &&
+                prefix.Count + duration + 1L <= MaxAreaEntries)
+            {
+                var boundaries = boundarySpan.Slice(draft.BoundaryStart, draft.BoundaryCount);
+                prefixStart = (ushort)prefix.Count;
+                prefixCount = (ushort)(duration + 1);
+                var boundaryIndex = 0;
+
+                for (var tick = 0; tick <= duration; tick++)
+                {
+                    while (boundaryIndex < boundaries.Length && boundaries[boundaryIndex].Tick < tick) boundaryIndex++;
+
+                    prefix.Add((ushort)boundaryIndex);
+                }
+            }
+            else
+            {
+                prefix.RemoveRange(prefixMark, prefix.Count - prefixMark);
+            }
+
+            if (width == 0)
+            {
+                lut8.RemoveRange(lut8Mark, lut8.Count - lut8Mark);
+                lut16.RemoveRange(lut16Mark, lut16.Count - lut16Mark);
+                factors.RemoveRange(factorMark, factors.Count - factorMark);
+            }
+
+            descriptors[i] = new TrackFastData(lutStart, lutCount, prefixStart, prefixCount, factorStart, width);
+        }
+
+        // Nothing qualified: bake no section at all so the flag stays clear
+        // and every query keeps the exact searched-path shape.
+        if (lut8.Count == 0 && lut16.Count == 0 && prefix.Count == 0 && factors.Count == 0) return null;
+
+        var header = new FastSectionHeader(
+            (ushort)_trackData.Count,
+            (ushort)lut8.Count,
+            (ushort)lut16.Count,
+            (ushort)prefix.Count,
+            (ushort)factors.Count);
+        var offsets = FastSectionOffsets.Compute(
+            header.DescriptorCount,
+            header.U8Entries,
+            header.U16Entries,
+            header.PrefixEntries,
+            header.FactorFloats);
+        var section = new byte[offsets.TotalBytes];
+
+        MemoryMarshal.Write(section.AsSpan(), in header);
+        MemoryMarshal.AsBytes(descriptors.AsSpan()).CopyTo(
+            section.AsSpan(Unsafe.SizeOf<FastSectionHeader>()));
+        MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(lut16)).CopyTo(section.AsSpan(offsets.U16Start));
+        MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(prefix)).CopyTo(section.AsSpan(offsets.PrefixStart));
+        MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(factors)).CopyTo(section.AsSpan(offsets.FactorStart));
+        CollectionsMarshal.AsSpan(lut8).CopyTo(section.AsSpan(offsets.U8Start));
+
+        return section;
+    }
+
+    /// <summary>
+    ///     Same binary search the query kernel uses; duplicated here because
+    ///     Baking may not reference Querying.
+    /// </summary>
+    private static int FindActiveClip(ReadOnlySpan<ClipEntry> clips, int tick)
+    {
+        var lo = 0;
+        var hi = clips.Length - 1;
+
+        while (lo <= hi)
+        {
+            var mid = (lo + hi) >>> 1;
+            ref readonly var clip = ref clips[mid];
+
+            if (tick < clip.Start) hi = mid - 1;
+            else if (tick >= clip.End) lo = mid + 1;
+            else return mid;
+        }
+
+        return -1;
     }
 
     private void CheckBuildCaps()

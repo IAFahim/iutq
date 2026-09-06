@@ -8,7 +8,7 @@ namespace Iutq.Core.Storage;
 internal readonly struct BlobHeader(
     uint magic,
     ushort version,
-    ushort reserved,
+    ushort featureFlags,
     ushort timelineCount,
     ushort trackCount,
     ushort trackDataCount,
@@ -20,7 +20,7 @@ internal readonly struct BlobHeader(
 {
     public readonly uint Magic = magic;
     public readonly ushort Version = version;
-    public readonly ushort Reserved = reserved;
+    public readonly ushort FeatureFlags = featureFlags;
     public readonly ushort TimelineCount = timelineCount;
     public readonly ushort TrackCount = trackCount;
     public readonly ushort TrackTemplateCount = trackDataCount;
@@ -29,6 +29,40 @@ internal readonly struct BlobHeader(
     public readonly ushort TypeCount = typeCount;
     public readonly ushort ArenaUnits = arenaUnits;
     public readonly uint PayloadHash = payloadHash;
+}
+
+/// <summary>
+///     Single source of truth for fast-lookup section geometry: areas sit at
+///     8-aligned offsets in the order descriptors, u16 LUT, prefix tables,
+///     blend factors, u8 LUT. Used by the builder when writing and by both
+///     validation and <see cref="DatabaseSections" /> when reading.
+/// </summary>
+internal readonly record struct FastSectionOffsets(
+    int U16Start,
+    int PrefixStart,
+    int FactorStart,
+    int U8Start,
+    int TotalBytes)
+{
+    public static FastSectionOffsets Compute(
+        int descriptorCount,
+        int u8Entries,
+        int u16Entries,
+        int prefixEntries,
+        int factorFloats)
+    {
+        var offset = Unsafe.SizeOf<FastSectionHeader>() + descriptorCount * Unsafe.SizeOf<TrackFastData>();
+        var u16 = offset = checked((offset + 7) & ~7);
+        offset = checked(offset + u16Entries * sizeof(ushort));
+        var prefix = offset = checked((offset + 7) & ~7);
+        offset = checked(offset + prefixEntries * sizeof(ushort));
+        var factor = offset = checked((offset + 7) & ~7);
+        offset = checked(offset + factorFloats * sizeof(float));
+        var u8 = offset = checked((offset + 7) & ~7);
+        offset = checked(offset + u8Entries);
+
+        return new FastSectionOffsets(u16, prefix, factor, u8, offset);
+    }
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -52,6 +86,17 @@ internal readonly unsafe struct DatabaseSections
     private readonly int _directoryCount;
     private readonly nint _arena;
     private readonly int _arenaBytes;
+    private readonly nint _fastDescriptors;
+    private readonly int _fastDescriptorCount;
+    private readonly nint _lut8;
+    private readonly int _lut8Count;
+    private readonly nint _lut16;
+    private readonly int _lut16Count;
+    private readonly nint _prefix;
+    private readonly int _prefixCount;
+    private readonly nint _factors;
+    private readonly int _factorCount;
+    private readonly bool _fastPresent;
 
     private DatabaseSections(
         nint timelines, int timelineCount,
@@ -62,7 +107,13 @@ internal readonly unsafe struct DatabaseSections
         nint boundaries, int boundaryCount,
         nint types, int typeCount,
         nint directory, int directoryCount,
-        nint arena, int arenaBytes)
+        nint arena, int arenaBytes,
+        bool fastPresent,
+        nint fastDescriptors, int fastDescriptorCount,
+        nint lut8, int lut8Count,
+        nint lut16, int lut16Count,
+        nint prefix, int prefixCount,
+        nint factors, int factorCount)
     {
         _timelines = timelines;
         _timelineCount = timelineCount;
@@ -82,6 +133,17 @@ internal readonly unsafe struct DatabaseSections
         _directoryCount = directoryCount;
         _arena = arena;
         _arenaBytes = arenaBytes;
+        _fastDescriptors = fastDescriptors;
+        _fastDescriptorCount = fastDescriptorCount;
+        _lut8 = lut8;
+        _lut8Count = lut8Count;
+        _lut16 = lut16;
+        _lut16Count = lut16Count;
+        _prefix = prefix;
+        _prefixCount = prefixCount;
+        _factors = factors;
+        _factorCount = factorCount;
+        _fastPresent = fastPresent;
     }
 
     internal ReadOnlySpan<TimelineHeader> Timelines => new((void*)_timelines, _timelineCount);
@@ -102,11 +164,30 @@ internal readonly unsafe struct DatabaseSections
 
     internal ReadOnlySpan<byte> Arena => new((void*)_arena, _arenaBytes);
 
+    internal ReadOnlySpan<TrackFastData> FastDescriptors => new((void*)_fastDescriptors, _fastDescriptorCount);
+
+    internal ReadOnlySpan<byte> Lut8 => new((void*)_lut8, _lut8Count);
+
+    internal ReadOnlySpan<ushort> Lut16 => new((void*)_lut16, _lut16Count);
+
+    internal ReadOnlySpan<ushort> Prefix => new((void*)_prefix, _prefixCount);
+
+    internal ReadOnlySpan<float> BlendFactors => new((void*)_factors, _factorCount);
+
+    internal FastLookupSections FastLookup => new(
+        _fastPresent,
+        FastDescriptors,
+        Lut8,
+        Lut16,
+        Prefix,
+        BlendFactors);
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static DatabaseSections Compute(byte[] blob)
     {
         ReadOnlySpan<byte> span = blob;
         var header = MemoryMarshal.Read<BlobHeader>(span);
+        var fast = (header.FeatureFlags & (ushort)BlobFeatures.FastLookup) != 0;
         var layout = SectionLayout.Compute(
             header.TimelineCount,
             header.TrackCount,
@@ -114,7 +195,41 @@ internal readonly unsafe struct DatabaseSections
             header.ClipCount,
             header.BoundaryCount,
             header.TypeCount,
-            header.ArenaUnits * Format.PayloadUnit);
+            header.ArenaUnits * Format.PayloadUnit,
+            fast ? span.Length - ((layout0Total(header) + 7) & ~7) : 0);
+
+        var fastDescriptors = (nint)0;
+        var fastDescriptorCount = 0;
+        var lut8 = (nint)0;
+        var lut8Count = 0;
+        var lut16 = (nint)0;
+        var lut16Count = 0;
+        var prefix = (nint)0;
+        var prefixCount = 0;
+        var factors = (nint)0;
+        var factorCount = 0;
+
+        if (fast)
+        {
+            var fastHeader = MemoryMarshal.Read<FastSectionHeader>(span.Slice(layout.FastStart));
+            var offsets = FastSectionOffsets.Compute(
+                fastHeader.DescriptorCount,
+                fastHeader.U8Entries,
+                fastHeader.U16Entries,
+                fastHeader.PrefixEntries,
+                fastHeader.FactorFloats);
+
+            fastDescriptorCount = fastHeader.DescriptorCount;
+            lut8Count = fastHeader.U8Entries;
+            lut16Count = fastHeader.U16Entries;
+            prefixCount = fastHeader.PrefixEntries;
+            factorCount = fastHeader.FactorFloats;
+            fastDescriptors = SectionPtr<TrackFastData>(span, layout.FastStart + Unsafe.SizeOf<FastSectionHeader>(), fastDescriptorCount);
+            lut16 = SectionPtr<ushort>(span, layout.FastStart + offsets.U16Start, lut16Count);
+            prefix = SectionPtr<ushort>(span, layout.FastStart + offsets.PrefixStart, prefixCount);
+            factors = SectionPtr<float>(span, layout.FastStart + offsets.FactorStart, factorCount);
+            lut8 = SectionPtr<byte>(span, layout.FastStart + offsets.U8Start, lut8Count);
+        }
 
         return new DatabaseSections(
             SectionPtr<TimelineHeader>(span, layout.Timelines, header.TimelineCount), header.TimelineCount,
@@ -127,7 +242,26 @@ internal readonly unsafe struct DatabaseSections
             SectionPtr<TrackSpan>(span, layout.Directory, checked(header.TimelineCount * header.TypeCount)),
             checked(header.TimelineCount * header.TypeCount),
             SectionPtr<byte>(span, layout.Arena, header.ArenaUnits * Format.PayloadUnit),
-            header.ArenaUnits * Format.PayloadUnit);
+            header.ArenaUnits * Format.PayloadUnit,
+            fast,
+            fastDescriptors, fastDescriptorCount,
+            lut8, lut8Count,
+            lut16, lut16Count,
+            prefix, prefixCount,
+            factors, factorCount);
+    }
+
+    private static int layout0Total(in BlobHeader header)
+    {
+        return SectionLayout.Compute(
+            header.TimelineCount,
+            header.TrackCount,
+            header.TrackTemplateCount,
+            header.ClipCount,
+            header.BoundaryCount,
+            header.TypeCount,
+            header.ArenaUnits * Format.PayloadUnit,
+            0).TotalBytes;
     }
 
     private static nint SectionPtr<T>(ReadOnlySpan<byte> blob, int offset, int count) where T : unmanaged
@@ -147,6 +281,8 @@ internal readonly record struct SectionLayout(
     int Types,
     int Directory,
     int Arena,
+    int FastStart,
+    int FastBytes,
     int TotalBytes)
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -157,7 +293,8 @@ internal readonly record struct SectionLayout(
         int clipCount,
         int boundaryCount,
         int typeCount,
-        int arenaBytes)
+        int arenaBytes,
+        int fastBytes)
     {
         var offset = Unsafe.SizeOf<BlobHeader>();
         var timelines = Advance<TimelineHeader>(ref offset, timelineCount);
@@ -170,17 +307,15 @@ internal readonly record struct SectionLayout(
         var directory = Advance<TrackSpan>(ref offset, checked(timelineCount * typeCount));
         var arena = AdvanceBytes(ref offset, arenaBytes);
 
+        if (fastBytes == 0)
+            return new SectionLayout(
+                timelines, lookup, tracks, trackData, clips, boundaries, types, directory, arena, offset, 0, offset);
+
+        var fastStart = checked((offset + 7) & ~7);
+
         return new SectionLayout(
-            timelines,
-            lookup,
-            tracks,
-            trackData,
-            clips,
-            boundaries,
-            types,
-            directory,
-            arena,
-            offset);
+            timelines, lookup, tracks, trackData, clips, boundaries, types, directory, arena,
+            fastStart, fastBytes, checked(fastStart + fastBytes));
     }
 
     private static int Advance<T>(ref int offset, int count)
@@ -248,7 +383,8 @@ public sealed class TimelineDatabase
             _sections.Boundaries,
             _sections.Types,
             _sections.Directory,
-            _sections.Arena);
+            _sections.Arena,
+            _sections.FastLookup);
     }
 
     public ClipTypeHandle<TClip> Resolve<TClip>(ClipType<TClip> type)
@@ -274,8 +410,10 @@ public sealed class TimelineDatabase
         TrackBoundary[] boundaries,
         TypeDescriptor[] types,
         TrackSpan[] directory,
-        byte[] arena)
+        byte[] arena,
+        byte[]? fastSection = null)
     {
+        var flags = fastSection is null ? (ushort)BlobFeatures.None : (ushort)BlobFeatures.FastLookup;
         var layout = SectionLayout.Compute(
             timelines.Length,
             tracks.Length,
@@ -283,14 +421,15 @@ public sealed class TimelineDatabase
             clips.Length,
             boundaries.Length,
             types.Length,
-            arena.Length);
+            arena.Length,
+            fastSection?.Length ?? 0);
 
         var blob = new byte[layout.TotalBytes];
 
         BlobHeader initial = new(
             Magic,
             Version,
-            0,
+            flags,
             checked((ushort)timelines.Length),
             checked((ushort)tracks.Length),
             checked((ushort)trackData.Length),
@@ -310,12 +449,13 @@ public sealed class TimelineDatabase
         WriteSection(blob, layout.Types, types);
         WriteSection(blob, layout.Directory, directory);
         arena.CopyTo(blob, layout.Arena);
+        fastSection?.CopyTo(blob, layout.FastStart);
 
         var hash = Fnv1A64.Hash(blob.AsSpan(Unsafe.SizeOf<BlobHeader>()));
         BlobHeader final = new(
             Magic,
             Version,
-            0,
+            flags,
             checked((ushort)timelines.Length),
             checked((ushort)tracks.Length),
             checked((ushort)trackData.Length),
@@ -336,7 +476,7 @@ public sealed class TimelineDatabase
             blob.AsSpan(offset, checked(values.Length * Unsafe.SizeOf<T>()))));
     }
 
-    private static SectionLayout ComputeLayout(in BlobHeader header)
+    private static SectionLayout ComputeLayout(in BlobHeader header, int fastBytes = 0)
     {
         return SectionLayout.Compute(
             header.TimelineCount,
@@ -345,7 +485,8 @@ public sealed class TimelineDatabase
             header.ClipCount,
             header.BoundaryCount,
             header.TypeCount,
-            header.ArenaUnits * Format.PayloadUnit);
+            header.ArenaUnits * Format.PayloadUnit,
+            fastBytes);
     }
 
     private static string DescribeError(BlobError error)
@@ -353,10 +494,11 @@ public sealed class TimelineDatabase
         return error switch
         {
             BlobError.Truncated => "iutq blob rejected: IUTQ1001: blob is smaller than the fixed header.",
-            BlobError.Header => "iutq blob rejected: IUTQ1002: bad magic, version or negative section counts.",
+            BlobError.Header => "iutq blob rejected: IUTQ1002: bad magic, version or unknown feature flags.",
             BlobError.Length => "iutq blob rejected: IUTQ1003: section layout total does not match the blob length.",
             BlobError.Hash => "iutq blob rejected: IUTQ1004: payload hash mismatch (corrupt or truncated body).",
             BlobError.Structure => "iutq blob rejected: IUTQ1005: structural validation failed.",
+            BlobError.FastLookup => "iutq blob rejected: IUTQ1006: fast-lookup section validation failed.",
             _ => "iutq blob rejected: IUTQ1000: unknown error."
         };
     }
@@ -381,7 +523,23 @@ public sealed class TimelineDatabase
                 return false;
             }
 
-            var layout = ComputeLayout(in header);
+            if ((header.FeatureFlags & ~(ushort)BlobFeatures.FastLookup) != 0)
+            {
+                error = BlobError.Header;
+                return false;
+            }
+
+            var fast = (header.FeatureFlags & (ushort)BlobFeatures.FastLookup) != 0;
+            var baseLayout = ComputeLayout(in header);
+            var fastBytes = 0;
+
+            if (fast && !TryComputeFastBytes(span, in header, baseLayout, out fastBytes))
+            {
+                error = BlobError.FastLookup;
+                return false;
+            }
+
+            var layout = fastBytes == 0 ? baseLayout : ComputeLayout(in header, fastBytes);
 
             if (layout.TotalBytes != span.Length)
             {
@@ -398,6 +556,12 @@ public sealed class TimelineDatabase
             if (!TryValidateStructure(span, in header, layout))
             {
                 error = BlobError.Structure;
+                return false;
+            }
+
+            if (fast && !TryValidateFast(span, in header, layout))
+            {
+                error = BlobError.FastLookup;
                 return false;
             }
 
@@ -419,6 +583,37 @@ public sealed class TimelineDatabase
             error = BlobError.Length;
             return false;
         }
+    }
+
+    /// <summary>
+    ///     Reads the fast-lookup section header behind the base layout and
+    ///     derives its byte size from the area counts. Only geometry is
+    ///     checked here; content is validated in <see cref="TryValidateFast" />.
+    /// </summary>
+    private static bool TryComputeFastBytes(
+        ReadOnlySpan<byte> span,
+        in BlobHeader header,
+        SectionLayout baseLayout,
+        out int fastBytes)
+    {
+        fastBytes = 0;
+        var fastStart = checked((baseLayout.TotalBytes + 7) & ~7);
+
+        if (span.Length < fastStart + Unsafe.SizeOf<FastSectionHeader>()) return false;
+
+        var fast = MemoryMarshal.Read<FastSectionHeader>(span.Slice(fastStart));
+
+        if (fast.Reserved0 != 0 || fast.Reserved1 != 0 || fast.Reserved2 != 0) return false;
+        if (fast.DescriptorCount != header.TrackTemplateCount) return false;
+
+        fastBytes = FastSectionOffsets.Compute(
+            fast.DescriptorCount,
+            fast.U8Entries,
+            fast.U16Entries,
+            fast.PrefixEntries,
+            fast.FactorFloats).TotalBytes;
+
+        return true;
     }
 
     private static bool TryValidateStructure(
@@ -501,6 +696,161 @@ public sealed class TimelineDatabase
         }
 
         return trackCursor == tracks.Length;
+    }
+
+    /// <summary>
+    ///     Per-template owning-timeline duration as seen by the directory
+    ///     (0 = unused, -1 = shared across timelines of different durations).
+    /// </summary>
+    private static int[] CollectTemplateDurations(
+        ReadOnlySpan<TimelineHeader> timelines,
+        ReadOnlySpan<TrackInstance> tracks,
+        ReadOnlySpan<TrackSpan> directory,
+        int typeCount,
+        int templateCount)
+    {
+        var durations = new int[templateCount];
+
+        for (var typeSlot = 0; typeSlot < typeCount; typeSlot++)
+        for (var timelineIndex = 0; timelineIndex < timelines.Length; timelineIndex++)
+        {
+            ref readonly var partition = ref directory[typeSlot * timelines.Length + timelineIndex];
+
+            for (var index = partition.TrackStart; index < partition.TrackStart + partition.TrackCount; index++)
+            {
+                ref readonly var instance = ref tracks[index];
+                var duration = timelines[timelineIndex].Duration;
+                var known = durations[instance.TrackTemplateId];
+                durations[instance.TrackTemplateId] = known == 0 ? duration : known == duration ? known : -1;
+            }
+        }
+
+        return durations;
+    }
+
+    /// <summary>
+    ///     Fast-lookup content validation: descriptors reference in-bounds LUT,
+    ///     prefix and factor areas, entries are sentinels or in-window clip
+    ///     indices, prefix tables are monotone and re-derive boundary counts,
+    ///     and every active structure agrees with its owning timeline duration.
+    /// </summary>
+    private static bool TryValidateFast(ReadOnlySpan<byte> blob, in BlobHeader header, SectionLayout layout)
+    {
+        var timelines = MemoryMarshal.Cast<byte, TimelineHeader>(
+            blob.Slice(layout.Timelines, checked(header.TimelineCount * Unsafe.SizeOf<TimelineHeader>())));
+        var tracks = MemoryMarshal.Cast<byte, TrackInstance>(
+            blob.Slice(layout.Tracks, checked(header.TrackCount * Unsafe.SizeOf<TrackInstance>())));
+        var trackData = MemoryMarshal.Cast<byte, TrackTemplate>(
+            blob.Slice(layout.TrackTemplate, checked(header.TrackTemplateCount * Unsafe.SizeOf<TrackTemplate>())));
+        var directory = MemoryMarshal.Cast<byte, TrackSpan>(
+            blob.Slice(layout.Directory,
+                checked(checked(header.TimelineCount * header.TypeCount) * Unsafe.SizeOf<TrackSpan>())));
+        var templateDurations = CollectTemplateDurations(
+            timelines, tracks, directory, header.TypeCount, header.TrackTemplateCount);
+
+        var fastHeader = MemoryMarshal.Read<FastSectionHeader>(blob.Slice(layout.FastStart));
+        var offsets = FastSectionOffsets.Compute(
+            fastHeader.DescriptorCount,
+            fastHeader.U8Entries,
+            fastHeader.U16Entries,
+            fastHeader.PrefixEntries,
+            fastHeader.FactorFloats);
+
+        if (offsets.TotalBytes != layout.FastBytes) return false;
+
+        var descriptors = MemoryMarshal.Cast<byte, TrackFastData>(blob.Slice(
+            layout.FastStart + Unsafe.SizeOf<FastSectionHeader>(),
+            checked(fastHeader.DescriptorCount * Unsafe.SizeOf<TrackFastData>())));
+        var lut8 = blob.Slice(layout.FastStart + offsets.U8Start, fastHeader.U8Entries);
+        var lut16 = MemoryMarshal.Cast<byte, ushort>(
+            blob.Slice(layout.FastStart + offsets.U16Start, checked(fastHeader.U16Entries * sizeof(ushort))));
+        var prefix = MemoryMarshal.Cast<byte, ushort>(
+            blob.Slice(layout.FastStart + offsets.PrefixStart, checked(fastHeader.PrefixEntries * sizeof(ushort))));
+        var factors = MemoryMarshal.Cast<byte, float>(
+            blob.Slice(layout.FastStart + offsets.FactorStart, checked(fastHeader.FactorFloats * sizeof(float))));
+
+        for (var i = 0; i < descriptors.Length; i++)
+        {
+            ref readonly var fast = ref descriptors[i];
+            var duration = templateDurations[i];
+
+            if (fast.Reserved0 != 0 || fast.Reserved1 != 0 || fast.LutWidth > 4) return false;
+
+            if (fast.LutWidth != 0)
+            {
+                if (duration <= 0 || fast.LutCount != duration) return false;
+
+                var lutLength = fast.LutWidth is 1 or 3 ? lut8.Length : lut16.Length;
+                var consumed = fast.LutWidth is 1 or 2
+                    ? (long)fast.LutStart + fast.LutCount
+                    : (long)fast.LutStart + 2 * (long)fast.LutCount;
+
+                if (consumed > lutLength) return false;
+
+                if (fast.LutWidth is 3 or 4 && (long)fast.FactorStart + fast.LutCount > factors.Length) return false;
+
+                ref readonly var template = ref trackData[i];
+
+                for (var tick = 0; tick < fast.LutCount; tick++)
+                {
+                    ushort a;
+                    ushort b;
+
+                    if (fast.LutWidth == 1)
+                    {
+                        a = lut8[fast.LutStart + tick];
+                        b = 0;
+                    }
+                    else if (fast.LutWidth == 2)
+                    {
+                        a = lut16[fast.LutStart + tick];
+                        b = 0;
+                    }
+                    else if (fast.LutWidth == 3)
+                    {
+                        var baseIndex = fast.LutStart + tick * 2;
+                        a = lut8[baseIndex];
+                        b = lut8[baseIndex + 1];
+                    }
+                    else
+                    {
+                        var baseIndex = fast.LutStart + tick * 2;
+                        a = lut16[baseIndex];
+                        b = lut16[baseIndex + 1];
+                    }
+
+                    if (a != 0 && (uint)(a - 1) >= template.ClipCount) return false;
+                    if (b != 0 && (uint)(b - 1) >= template.ClipCount) return false;
+                }
+            }
+            else if (fast.LutCount != 0)
+            {
+                return false;
+            }
+
+            if (fast.PrefixCount != 0)
+            {
+                if (duration <= 0 || fast.PrefixCount != duration + 1) return false;
+                if ((long)fast.PrefixStart + fast.PrefixCount > prefix.Length) return false;
+
+                var boundaryCount = trackData[i].BoundaryCount;
+                var previous = 0;
+
+                for (var t = 0; t < fast.PrefixCount; t++)
+                {
+                    var value = prefix[fast.PrefixStart + t];
+
+                    if (value < previous || value > boundaryCount) return false;
+
+                    previous = value;
+                }
+
+                if (prefix[fast.PrefixStart] != 0) return false;
+                if (prefix[fast.PrefixStart + fast.PrefixCount - 1] != boundaryCount) return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool ValidateTypes(ReadOnlySpan<TypeDescriptor> types)
@@ -669,6 +1019,7 @@ public sealed class TimelineDatabase
         Header,
         Length,
         Hash,
-        Structure
+        Structure,
+        FastLookup
     }
 }

@@ -344,3 +344,95 @@ public readonly struct TrackSpan : IEquatable<TrackSpan>
         return !left.Equals(right);
     }
 }
+
+/// <summary>
+///     Optional features recorded in the blob header's feature-flags field.
+///     Blob format v2 blobs carry zero flags and load unchanged.
+/// </summary>
+[Flags]
+internal enum BlobFeatures : ushort
+{
+    None = 0,
+
+    /// <summary>An optional fast-lookup section follows the payload arena.</summary>
+    FastLookup = 1
+}
+
+/// <summary>
+///     First 16 bytes of the fast-lookup section. All area sizes are entry
+///     counts; byte offsets are recomputed deterministically (8-aligned per
+///     area in the order descriptors, u16 LUT, prefix, blend factors, u8 LUT).
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+internal readonly struct FastSectionHeader
+{
+    public readonly ushort DescriptorCount;
+    public readonly ushort U8Entries;
+    public readonly ushort U16Entries;
+    public readonly ushort PrefixEntries;
+    public readonly ushort FactorFloats;
+    public readonly ushort Reserved0;
+    public readonly ushort Reserved1;
+    public readonly ushort Reserved2;
+
+    public FastSectionHeader(
+        ushort descriptorCount,
+        ushort u8Entries,
+        ushort u16Entries,
+        ushort prefixEntries,
+        ushort factorFloats)
+    {
+        DescriptorCount = descriptorCount;
+        U8Entries = u8Entries;
+        U16Entries = u16Entries;
+        PrefixEntries = prefixEntries;
+        FactorFloats = factorFloats;
+    }
+}
+
+/// <summary>
+///     Per-TrackTemplate fast-lookup descriptor (16 bytes), parallel to the
+///     TrackTemplate section and only present when the FastLookup feature flag
+///     is set.
+///
+///     LUT semantics (entry value e, clip index c within the template window):
+///       width 1 - exclusive, u8:  e == 0 means no clip, else c == e - 1.
+///       width 2 - exclusive, u16: same encoding in the u16 area.
+///       width 3 - crossfade, u8 pairs: two u8 entries per tick
+///                 (lane A then lane B, each 0 = none), plus a baked
+///                 BlendFactor float per tick in the factor area.
+///       width 4 - crossfade, u16 pairs: same encoding in the u16 area.
+///
+///     Prefix tables: PrefixCount == owning duration + 1 ushorts; entry i is
+///     the index of the first boundary with Tick &gt;= i. LutStart/PrefixStart/
+///     FactorStart are entry indices into their areas; every area is capped at
+///     65,535 entries because all offsets are 16-bit.
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+internal readonly struct TrackFastData
+{
+    public readonly ushort LutStart;
+    public readonly ushort LutCount;
+    public readonly ushort PrefixStart;
+    public readonly ushort PrefixCount;
+    public readonly ushort FactorStart;
+    public readonly byte LutWidth;
+    public readonly byte Reserved0;
+    public readonly ushort Reserved1;
+
+    public TrackFastData(
+        ushort lutStart,
+        ushort lutCount,
+        ushort prefixStart,
+        ushort prefixCount,
+        ushort factorStart,
+        byte lutWidth)
+    {
+        LutStart = lutStart;
+        LutCount = lutCount;
+        PrefixStart = prefixStart;
+        PrefixCount = prefixCount;
+        FactorStart = factorStart;
+        LutWidth = lutWidth;
+    }
+}

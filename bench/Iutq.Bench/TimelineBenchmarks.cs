@@ -82,13 +82,16 @@ public class TimelineBenchmarks
     private TimelineDatabase _dbCrossFade = null!;
     private TimelineDatabase _dbExclusive = null!;
     private TimelineDatabase _dbPulse = null!;
+    private TimelineDatabase _dbWide = null!;
     private TimelineCursor[] _eightCursors = null!;
     private ClipTypeHandle<BenchClip> _handleCrossFade;
     private ClipTypeHandle<BenchClip> _handleExclusive;
     private ClipTypeHandle<BenchClip> _handlePulse;
+    private ClipTypeHandle<BenchClip> _handleWide;
     private TimelineIndex _pulseTimeline;
     private TimelineCursor[] _singleCursor = null!;
     private TimelineIndex[] _timelineIndexs = null!;
+    private TimelineIndex _wideTimeline;
 
     [GlobalSetup]
     public void Setup()
@@ -142,6 +145,19 @@ public class TimelineBenchmarks
 
         for (var i = 0; i < 8; i++)
             _eightCursors[i] = new TimelineCursor(_timelineIndexs[i], 24, TimelineDirection.Forward);
+
+        // Wide track: 128 clips over 256 ticks — deep enough that the searched
+        // binary search and boundary search have real work to do.
+        DatabaseBuilder wideBuilder = new();
+        _wideTimeline = wideBuilder.AddTimeline(new TimelineKey(0xD1), 256);
+        ClipDefinition<BenchClip>[] wideClips = new ClipDefinition<BenchClip>[128];
+
+        for (var i = 0; i < 128; i++)
+            wideClips[i] = Clip.Range(i * 2, i * 2 + 2, new BenchClip { A = i, B = 0.25f });
+
+        wideBuilder.AddTrack(_wideTimeline, BenchTypes.Clip, new BindingId(0), TrackMode.Exclusive, wideClips);
+        _dbWide = wideBuilder.Build();
+        _handleWide = _dbWide.Resolve(BenchTypes.Clip);
 
         VerifyProtocol();
     }
@@ -224,6 +240,15 @@ public class TimelineBenchmarks
             5);
         AssertEqual("TraverseRewindTwentyFive", CountTransitions(pulseQuery, new TimelineSpan(_pulseTimeline, 25, 5)),
             4);
+
+        var wideView = _dbWide.AsView();
+        var wideQuery = wideView.Query(_handleWide);
+        var wideTrack = wideQuery.Tracks(_wideTimeline)[0];
+        SampleSum wideFused = default;
+        wideQuery.Sample(in wideTrack, 100, ref wideFused);
+        AssertApprox("WideSampleFusedOneTrack", wideFused.A + wideFused.B, 50.25f, tolerance);
+        AssertEqual("WideTraverseForwardOneTick", CountTransitions(wideQuery, new TimelineSpan(_wideTimeline, 4, 5)), 1);
+        AssertEqual("WideTraverseForwardFullSpan", CountTransitions(wideQuery, new TimelineSpan(_wideTimeline, 0, 63)), 63);
 
         AssertEqual("QuerySetupOnly", query.Tracks(_timelineIndexs[0]).Length, 1);
     }
@@ -401,5 +426,26 @@ public class TimelineBenchmarks
         var view = _dbExclusive.AsView();
         var query = view.Query(_handleExclusive);
         return query.Tracks(_timelineIndexs[0]).Length;
+    }
+
+    [Benchmark]
+    public float WideSampleFusedOneTrack()
+    {
+        var view = _dbWide.AsView();
+        var query = view.Query(_handleWide);
+        var track = query.Tracks(_wideTimeline)[0];
+        SampleSum acc = default;
+        query.Sample(in track, 100, ref acc);
+        return acc.A + acc.B;
+    }
+
+    [Benchmark]
+    public long WideTraverseForwardOneTick()
+    {
+        var view = _dbWide.AsView();
+        var query = view.Query(_handleWide);
+        TimelineSpan span = new(_wideTimeline, 4, 5);
+        TransitionCounter counter = default;
+        return query.TraverseTransitions(in span, ref counter) + counter.Count;
     }
 }

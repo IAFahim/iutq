@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Iutq.Core.Baking;
 using Iutq.Core.Primitives;
@@ -520,6 +521,330 @@ public sealed class TimelineQueryTests
                 [Clip.Range(0, 64, new TestClip(1))]));
     }
 
+    [Fact]
+    public void FromNameKeysAreStableAndDistinct()
+    {
+        var a = TimelineKey.FromName("combat.light_attack");
+        var b = TimelineKey.FromName("combat.light_attack");
+        var c = TimelineKey.FromName("combat.heavy_attack");
+
+        Assert.Equal(a, b);
+        Assert.NotEqual(a, c);
+        Assert.NotEqual(0UL, a.Value);
+
+        var type = ClipType<TestClip>.FromName("game.test_clip");
+        Assert.Equal(ClipType<TestClip>.FromName("game.test_clip").Key, type.Key);
+        Assert.NotEqual(ClipType<TestClip>.FromName("game.other_clip").Key, type.Key);
+        Assert.NotEqual(0UL, type.Key);
+
+        DatabaseBuilder builder = new();
+        var timeline = builder.AddTimeline(TimelineKey.FromName("combat.light_attack"), 20);
+        builder.AddTrack(
+            timeline,
+            ClipType<TestClip>.FromName("game.test_clip"),
+            new BindingId(0),
+            TrackMode.Exclusive,
+            [Clip.Range(0, 10, new TestClip(5))]);
+
+        var db = builder.Build();
+        var view = db.AsView();
+        Assert.True(view.TryResolve(TimelineKey.FromName("combat.light_attack"), out var resolved));
+        Assert.Equal(timeline, resolved);
+
+        var query = view.Query(ClipType<TestClip>.FromName("game.test_clip"));
+        var track = query.Tracks(resolved)[0];
+        var samples = query.Sample(in track, 3);
+        Assert.True(samples.MoveNext());
+        Assert.Equal(5, query.Data(samples.Current.DataOffset).Value);
+    }
+
+    [Fact]
+    public void QueryByTypeOverloadResolvesAndThrows()
+    {
+        var db = BuildCrossFade();
+        var view = db.AsView();
+
+        var query = view.Query(TestTypes.Clip);
+        var track = query.Tracks(new TimelineIndex(0))[0];
+        var samples = query.Sample(in track, 1);
+        Assert.True(samples.MoveNext());
+        Assert.Equal(1f, samples.Current.Weight, 4);
+
+        Assert.Throws<KeyNotFoundException>(
+            () => db.AsView().Query(ClipType<TestClip>.FromName("game.missing")));
+    }
+
+    [Fact]
+    public void LambdaOverloadsMatchVisitorForms()
+    {
+        var db = BuildCrossFade();
+        var view = db.AsView();
+        var query = view.Query(TestTypes.Clip);
+        var track = query.Tracks(new TimelineIndex(0))[0];
+
+        SumVisitor visitor = default;
+        query.Sample(in track, 4, ref visitor);
+
+        float lambdaSum = 0f;
+        query.Sample(
+            in track,
+            4,
+            ref lambdaSum,
+            static (ref float sum, in TrackInstance t, in TestClip clip, float weight) => sum += clip.Value * weight);
+        Assert.Equal(visitor.Sum, lambdaSum, 5);
+
+        Span<TimelineCursor> cursors = stackalloc TimelineCursor[1];
+        cursors[0] = new TimelineCursor(new TimelineIndex(0), 4, TimelineDirection.Forward);
+
+        SumVisitor spanVisitor = default;
+        query.Sample(cursors, ref spanVisitor);
+
+        float spanLambda = 0f;
+        query.Sample(
+            cursors,
+            ref spanLambda,
+            static (ref float sum, in TrackInstance t, in TestClip clip, float weight) => sum += clip.Value * weight);
+        Assert.Equal(spanVisitor.Sum, spanLambda, 5);
+
+        FrameSink frameSink = default;
+        query.VisitFrames(cursors, ref frameSink);
+
+        float frameLambda = 0f;
+        query.VisitFrames(
+            cursors,
+            ref frameLambda,
+            static (ref float sum, in TrackInstance t, in ClipFrame frame, in TestClip clip) =>
+                sum += clip.Value * frame.Weight);
+        Assert.Equal(frameSink.Sum, frameLambda, 5);
+
+        TransitionRecorder recorder = default;
+        query.TraverseTransitions(new TimelineSpan(new TimelineIndex(0), 2, 5), ref recorder);
+
+        int lambdaEnter = 0;
+        query.TraverseTransitions(
+            new TimelineSpan(new TimelineIndex(0), 2, 5),
+            ref lambdaEnter,
+            static (ref int enter, in TrackInstance t, in ClipTransition transition, in TestClip clip) =>
+            {
+                if (transition.Phase == ClipPhase.Enter) enter++;
+            },
+            static (ref int enter, in TrackInstance t, in BlendTransition transition, in TestClip clipA, in TestClip clipB) =>
+            {
+                if (transition.Phase == BlendPhase.Enter) enter += 100;
+            });
+
+        Assert.Equal(recorder.ClipEnter, lambdaEnter % 100);
+        Assert.Equal(recorder.BlendEnter * 100, lambdaEnter - lambdaEnter % 100);
+    }
+
+    [Fact]
+    public void FastLookupSamplingAndFramesAreBitExact()
+    {
+        var (searched, fast) = BuildParityPair();
+
+        var a = searched.AsView();
+        var b = fast.AsView();
+        var qa = a.Query(TestTypes.Clip);
+        var qb = b.Query(TestTypes.Clip);
+
+        for (var timeline = 0; timeline < a.Timelines.Length; timeline++)
+        {
+            var tracksA = qa.Tracks(new TimelineIndex(timeline));
+            var tracksB = qb.Tracks(new TimelineIndex(timeline));
+            Assert.Equal(tracksA.Length, tracksB.Length);
+
+            for (var trackIndex = 0; trackIndex < tracksA.Length; trackIndex++)
+            {
+                ref readonly var trackA = ref tracksA[trackIndex];
+                ref readonly var trackB = ref tracksB[trackIndex];
+
+                for (var tick = 0; tick < a.Timelines[timeline].Duration; tick++)
+                {
+                    var samplesA = qa.Sample(in trackA, tick);
+                    var samplesB = qb.Sample(in trackB, tick);
+
+                    while (true)
+                    {
+                        var movedA = samplesA.MoveNext();
+                        Assert.Equal(movedA, samplesB.MoveNext());
+
+                        if (!movedA) break;
+
+                        Assert.Equal(samplesA.Current.DataOffset, samplesB.Current.DataOffset);
+                        Assert.Equal(samplesA.Current.Weight, samplesB.Current.Weight);
+                    }
+
+                    foreach (var direction in new[] { TimelineDirection.Forward, TimelineDirection.Reverse, TimelineDirection.None })
+                    {
+                        var framesA = qa.VisitFrames(in trackA, tick, direction);
+                        var framesB = qb.VisitFrames(in trackB, tick, direction);
+
+                        while (true)
+                        {
+                            var movedA = framesA.MoveNext();
+                            Assert.Equal(movedA, framesB.MoveNext());
+
+                            if (!movedA) break;
+
+                            Assert.Equal(framesA.Current.Start, framesB.Current.Start);
+                            Assert.Equal(framesA.Current.End, framesB.Current.End);
+                            Assert.Equal(framesA.Current.DataOffset, framesB.Current.DataOffset);
+                            Assert.Equal(framesA.Current.Weight, framesB.Current.Weight);
+                            Assert.Equal(framesA.Current.BlendFactor, framesB.Current.BlendFactor);
+                            Assert.Equal(framesA.Current.BlendPhase, framesB.Current.BlendPhase);
+                            Assert.Equal(framesA.Current.Phase, framesB.Current.Phase);
+                            Assert.Equal(framesA.Current.Progress, framesB.Current.Progress);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void FastLookupTraversalIsBitExact()
+    {
+        var (searched, fast) = BuildParityPair();
+
+        var qa = searched.AsView().Query(TestTypes.Clip);
+        var qb = fast.AsView().Query(TestTypes.Clip);
+
+        // (previous, current) pairs: single-tick, rewind, loop crossings, full span.
+        (long Previous, long Current, TimelineIndex Timeline)[] spans =
+        [
+            (4, 5, new TimelineIndex(0)),
+            (30, 5, new TimelineIndex(0)),
+            (0, 63, new TimelineIndex(0)),
+            (9, 12, new TimelineIndex(1)),
+            (3, -2, new TimelineIndex(1)),
+            (9, 10, new TimelineIndex(1)),
+            (5, 6, new TimelineIndex(2)),
+            (2200, 2600, new TimelineIndex(2))
+        ];
+
+        foreach (var (previous, current, timeline) in spans)
+        {
+            var span = new TimelineSpan(timeline, previous, current);
+
+            FullTransitionRecorder ra = default;
+            FullTransitionRecorder rb = default;
+            var emittedA = qa.TraverseTransitions(in span, ref ra);
+            var emittedB = qb.TraverseTransitions(in span, ref rb);
+
+            Assert.Equal(emittedA, emittedB);
+            Assert.Equal(ra.Count, rb.Count);
+            Assert.Equal(ra.TickSum, rb.TickSum);
+            Assert.Equal(ra.OffsetSum, rb.OffsetSum);
+            Assert.Equal(ra.PhaseSum, rb.PhaseSum);
+            Assert.Equal(ra.FactorSum, rb.FactorSum);
+        }
+    }
+
+    [Fact]
+    public void FastLookupBlobRoundTripsThroughLoad()
+    {
+        var (searched, fast) = BuildParityPair();
+
+        var loaded = TimelineDatabase.Load(fast.ToArray());
+        var qa = searched.AsView().Query(TestTypes.Clip);
+        var qb = loaded.AsView().Query(TestTypes.Clip);
+
+        var trackA = qa.Tracks(new TimelineIndex(0))[0];
+        var trackB = qb.Tracks(new TimelineIndex(0))[0];
+
+        var samplesA = qa.Sample(in trackA, 20);
+        var samplesB = qb.Sample(in trackB, 20);
+
+        while (samplesA.MoveNext())
+        {
+            Assert.True(samplesB.MoveNext());
+            Assert.Equal(samplesA.Current.DataOffset, samplesB.Current.DataOffset);
+            Assert.Equal(samplesA.Current.Weight, samplesB.Current.Weight);
+        }
+
+        Assert.False(samplesB.MoveNext());
+
+        // Flag-free blobs are untouched by the extension.
+        Assert.True(fast.ToArray().Length > searched.ToArray().Length);
+    }
+
+    [Fact]
+    public void FastLookupBlobRejectsTampering()
+    {
+        DatabaseBuilder builder = new();
+        var timeline = builder.AddTimeline(new TimelineKey(9), 64);
+        ClipDefinition<TestClip>[] clips = new ClipDefinition<TestClip>[16];
+
+        for (var i = 0; i < 16; i++)
+        {
+            var payload = new TestClip(i + 1);
+            clips[i] = Clip.Range(i * 4, i * 4 + 4, in payload);
+        }
+
+        builder.AddTrack(timeline, TestTypes.Clip, new BindingId(0), TrackMode.Exclusive, clips);
+
+        var plain = builder.Build(false).ToArray();
+        var fast = builder.Build(true).ToArray();
+
+        // Any raw byte flip breaks the payload hash first.
+        var tampered = builder.Build(true).ToArray();
+        tampered[^1] ^= 0xFF;
+        Assert.Throws<InvalidDataException>(() => TimelineDatabase.Load(tampered));
+
+        // Reserved header words must stay zero (offset known: the fast section
+        // starts at Align8(plain length) and Reserved0 sits 10 bytes in).
+        var reserved = fast.AsSpan().ToArray();
+        var fastStart = (plain.Length + 7) & ~7;
+        reserved[fastStart + 10] = 0xAA;
+        Assert.Contains("IUTQ1006", Assert.Throws<InvalidDataException>(() => TimelineDatabase.Load(WithFixedHash(reserved))).Message);
+
+        // A LUT entry outside the template's clip window is rejected. The u8
+        // area is the section's last area: with one narrow exclusive track of
+        // 64 ticks it is exactly the final 64 bytes of the blob.
+        var lut = fast.AsSpan().ToArray();
+        lut[^30] = 200;
+        Assert.Contains("IUTQ1006", Assert.Throws<InvalidDataException>(() => TimelineDatabase.Load(WithFixedHash(lut))).Message);
+
+        GC.KeepAlive(plain);
+    }
+
+    [Fact]
+    public void FastLookupLongTimelineFallsBackToSearch()
+    {
+        var (searched, fast) = BuildParityPair();
+
+        // Timeline 2 (duration 3000) exceeds every LUT strategy: both
+        // databases must still agree tick for tick.
+        var qa = searched.AsView().Query(TestTypes.Clip);
+        var qb = fast.AsView().Query(TestTypes.Clip);
+        var trackA = qa.Tracks(new TimelineIndex(2))[0];
+        var trackB = qb.Tracks(new TimelineIndex(2))[0];
+
+        foreach (var tick in new[] { 0, 999, 1000, 1500, 1999, 2000, 2499, 2999 })
+        {
+            var samplesA = qa.Sample(in trackA, tick);
+            var samplesB = qb.Sample(in trackB, tick);
+
+            while (true)
+            {
+                var movedA = samplesA.MoveNext();
+                Assert.Equal(movedA, samplesB.MoveNext());
+
+                if (!movedA) break;
+
+                Assert.Equal(samplesA.Current.DataOffset, samplesB.Current.DataOffset);
+                Assert.Equal(samplesA.Current.Weight, samplesB.Current.Weight);
+            }
+        }
+
+        FullTransitionRecorder ra = default;
+        FullTransitionRecorder rb = default;
+        qa.TraverseTransitions(new TimelineSpan(new TimelineIndex(2), 2000, 2600), ref ra);
+        qb.TraverseTransitions(new TimelineSpan(new TimelineIndex(2), 2000, 2600), ref rb);
+        Assert.Equal(ra.Count, rb.Count);
+        Assert.Equal(ra.TickSum, rb.TickSum);
+    }
+
     private static TimelineDatabase BuildSingleTrack(
         int duration,
         TrackMode mode,
@@ -590,5 +915,157 @@ public sealed class TimelineQueryTests
         {
             Sum += clip.Value * weight;
         }
+    }
+
+    private struct FullTransitionRecorder : IClipTransitionVisitor<TestClip>
+    {
+        public long Count;
+        public long TickSum;
+        public int OffsetSum;
+        public int PhaseSum;
+        public float FactorSum;
+
+        public void OnClipTransition(in TrackInstance track, in ClipTransition transition, in TestClip clip)
+        {
+            Count++;
+            TickSum += transition.GlobalTick;
+            OffsetSum += transition.DataOffset;
+            PhaseSum += (int)transition.Phase;
+        }
+
+        public void OnBlendTransition(
+            in TrackInstance track,
+            in BlendTransition transition,
+            in TestClip clipA,
+            in TestClip clipB)
+        {
+            Count++;
+            TickSum += transition.GlobalTick;
+            OffsetSum += transition.DataOffsetA + transition.DataOffsetB;
+            PhaseSum += (int)transition.Phase;
+            FactorSum += transition.Factor;
+        }
+    }
+
+    /// <summary>
+    ///     One authoring shape baked twice: flag off (searched path) and flag
+    ///     on (fast-lookup section). Covers exclusive u8 LUT, crossfade u8
+    ///     pair LUT with baked factors, loop + pulse, one-frame blend, and a
+    ///     duration-3000 timeline that must fall back to the searched path.
+    /// </summary>
+    private static (TimelineDatabase Searched, TimelineDatabase Fast) BuildParityPair()
+    {
+        TestClip c1 = new(1);
+        TestClip c2 = new(2);
+        TestClip c3 = new(3);
+        TestClip c4 = new(4);
+
+        DatabaseBuilder Builder()
+        {
+            DatabaseBuilder builder = new();
+
+            var main = builder.AddTimeline(new TimelineKey(1), 64);
+            var loop = builder.AddTimeline(new TimelineKey(2), 10, TimelineFlags.Loop);
+            var long1 = builder.AddTimeline(new TimelineKey(3), 3000);
+
+            builder.AddTrack(
+                main,
+                TestTypes.Clip,
+                new BindingId(0),
+                TrackMode.Exclusive,
+                [
+                    Clip.Range(0, 16, in c1),
+                    Clip.Range(20, 36, in c2),
+                    Clip.Range(48, 64, in c3)
+                ]);
+
+            builder.AddTrack(
+                main,
+                TestTypes.Clip,
+                new BindingId(1),
+                TrackMode.CrossFade,
+                [
+                    Clip.Range(0, 24, in c1),
+                    Clip.Range(16, 48, in c2),
+                    Clip.Range(40, 64, in c3)
+                ]);
+
+            // Wide exclusive track: 16 clips over 64 ticks — above the LUT and
+            // prefix thresholds, so the narrow u8 LUT and prefix table bake.
+            ClipDefinition<TestClip>[] wideExclusive = new ClipDefinition<TestClip>[16];
+
+            for (var i = 0; i < 16; i++)
+            {
+                var payload = new TestClip(i + 1);
+                wideExclusive[i] = Clip.Range(i * 4, i * 4 + 4, in payload);
+            }
+
+            builder.AddTrack(main, TestTypes.Clip, new BindingId(2), TrackMode.Exclusive, wideExclusive);
+
+            // Wide crossfade: two lanes of 10 clips each, strict pairwise
+            // overlaps (A_i [i*6, i*6+6) vs B_i [i*6+3, i*6+9)).
+            List<ClipDefinition<TestClip>> wideCrossFade = [];
+
+            for (var i = 0; i < 10; i++)
+            {
+                var a = new TestClip(100 + i);
+                var b = new TestClip(200 + i);
+                wideCrossFade.Add(Clip.Range(i * 6, i * 6 + 6, in a));
+                wideCrossFade.Add(Clip.Range(i * 6 + 3, i * 6 + 9, in b));
+            }
+
+            builder.AddTrack(
+                main,
+                TestTypes.Clip,
+                new BindingId(3),
+                TrackMode.CrossFade,
+                CollectionsMarshal.AsSpan(wideCrossFade));
+
+            builder.AddTrack(
+                loop,
+                TestTypes.Clip,
+                new BindingId(0),
+                TrackMode.Exclusive,
+                [Clip.At(5, in c4)]);
+
+            builder.AddTrack(
+                loop,
+                TestTypes.Clip,
+                new BindingId(1),
+                TrackMode.CrossFade,
+                [
+                    Clip.Range(2, 4, in c1),
+                    Clip.Range(3, 5, in c2)
+                ]);
+
+            builder.AddTrack(
+                long1,
+                TestTypes.Clip,
+                new BindingId(0),
+                TrackMode.Exclusive,
+                [
+                    Clip.Range(0, 1000, in c1),
+                    Clip.Range(2000, 2500, in c2)
+                ]);
+
+            return builder;
+        }
+
+        return (Builder().Build(false), Builder().Build(true));
+    }
+
+    /// <summary>Test-local FNV-1a 64 + header hash rewrite, mirroring the format.</summary>
+    private static byte[] WithFixedHash(byte[] blob)
+    {
+        ulong hash = 14695981039346656037UL;
+
+        for (var i = 28; i < blob.Length; i++)
+        {
+            hash ^= blob[i];
+            hash *= 1099511628211UL;
+        }
+
+        BitConverter.GetBytes((uint)hash).CopyTo(blob.AsSpan(24));
+        return blob;
     }
 }

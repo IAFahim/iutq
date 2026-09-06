@@ -109,6 +109,13 @@ DatabaseView db = database.AsView();
 ClipQuery<ForceClip> force = db.Query(forceHandle);
 ```
 
+Keys can be derived from stable names instead of hand-picked constants —
+`ClipType<ForceClip>.FromName("game.force")` and
+`TimelineKey.FromName("combat.light_attack")` hash the UTF-8 name with
+FNV-1a 64, deterministically across processes and machines. `DatabaseView`
+also offers `Query(ClipType<T>)`, which resolves inline; keep the handle form
+in hot loops that bind once and query many times.
+
 All lookups after binding are dense integer indexing. No process-wide generic type cache (the V2 `TypeSlotCache` and its volatile traffic are gone).
 
 ## Baking
@@ -194,6 +201,15 @@ force.Sample(activeTimelines, ref accumulator);
 
 The fastest common case: track identity + payload + weight, nothing else constructed. Per-track fused form: `Sample(in track, tick, ref visitor)`. Level 3 is an optimized helper and is never required — every level composes with the others.
 
+For call sites that find visitor structs heavy, every fused pass has a lambda form over a `ref` state value — non-capturing lambdas convert without allocation:
+
+```cs
+float forward = 0;
+force.Sample(activeTimelines, ref forward,
+    static (ref float sum, in TrackInstance track, in ForceClip clip, float weight) =>
+        sum += clip.Forward * weight);
+```
+
 `activeTimelines` is caller-owned memory — an ECS buffer, native slice, stack span, arena range or any other storage.
 
 ## Skipped ticks and rewind
@@ -205,7 +221,29 @@ TimelineSpan movement = new(timeline, previousRawTick, currentRawTick);
 query.TraverseTransitions(in movement, ref transitionVisitor);
 ```
 
-The baker stores a sorted boundary index per interned `TrackTemplate`; traversal binary-searches that immutable window and emits `ClipTransition`/`BlendTransition` occurrences with absolute `GlobalTick`s. Forward and reverse traversal both support looping raw ticks across multiple cycles, and a per-track overload (`TraverseTransitions(in track, in span, ref visitor)`) serves systems that own the outer track loop. One-frame clips therefore replace V2's separate event model while surviving skipped ticks and rewind.
+The baker stores a sorted boundary index per interned `TrackTemplate`; traversal binary-searches that immutable window and emits `ClipTransition`/`BlendTransition` occurrences with absolute `GlobalTick`s. Forward and reverse traversal both support looping raw ticks across multiple cycles, and a per-track overload (`TraverseTransitions(in track, in span, ref visitor)`) serves systems that own the outer track loop. One-frame clips therefore replace V2's separate event model while surviving skipped ticks and rewind. A lambda form takes the two occurrence actions directly:
+
+```cs
+damage.TraverseTransitions(
+    in movement,
+    ref state,
+    static (ref S s, in TrackInstance t, in ClipTransition x, in DamagePulseClip clip) => { ... },
+    static (ref S s, in TrackInstance t, in BlendTransition x, in DamagePulseClip a, in DamagePulseClip b) => { ... });
+```
+
+## Fast-lookup section (opt-in)
+
+`Build(enableFastLookup: true)` bakes, per interned `TrackTemplate`, the structures the searched kernel would otherwise compute per query:
+
+- **tick → clip LUTs** for tracks whose longest lane exceeds 8 clips — u8 entries when the timeline is ≤ 256 ticks and the window ≤ 254 clips, u16 up to 2048 ticks. Crossfade tracks store both lane entries per tick plus the baked `BlendFactor`.
+- **tick → boundary prefix tables** for tracks with more than 8 boundaries — traversal window selection becomes two loads instead of a binary search.
+- Blend factors are baked with the exact op order the kernel uses, so weights are **bit-identical** between the searched and fast paths (asserted by test, and again by the benchmark's GlobalSetup).
+
+Thresholds matter: below 8 clips per lane the searched path is already a short comparison chain over one cache line, and a LUT indirection only adds dependent loads — the same lesson the source-generated kernels learned. Databases where nothing qualifies bake no section at all and keep the exact searched-path shape. Areas cap at 65,535 entries (16-bit offsets); templates shared across timelines of different durations stay searched.
+
+`Load()` fully revalidates the section — descriptor bounds, entry sentinels, prefix monotonicity, area geometry — and rejects corrupt data with `IUTQ1006`; it is never trusted blindly.
+
+Measured, same session (i9-14900K): sampling a 128-clip track **6.67 → 4.34 ns (−35%)**, single-tick traversal over its 256 boundaries **11.86 → 9.88 ns (−17%)**; tracks below the thresholds measure unchanged. For the last mile — payload addresses baked into code, zero lookups at all — see the source-generated frozen kernels on the `waffle-lut` branch.
 
 ## Removed from V2
 
@@ -235,7 +273,7 @@ Every persisted field uses the narrowest atomic width (1, 2 or 4 bytes — odd w
 | TypeDescriptor      | 16 → 12         |
 | TrackSpan           | 8 → 4           |
 
-Hard caps live in `Iutq.Core.Format` and the baker rejects exceeding them with named errors: 65,535 timelines / tracks / track templates / clips / boundaries / types per database, 65,535 ticks per timeline, bindings `0..65,535`, and a 256 KB payload arena (16-bit offsets in 4-byte units). The payload hash is truncated to 32 bits. A v1 blob is rejected with `IUTQ1002` (bad version); raising a cap means widening the field and bumping the version.
+Hard caps live in `Iutq.Core.Format` and the baker rejects exceeding them with named errors: 65,535 timelines / tracks / track templates / clips / boundaries / types per database, 65,535 ticks per timeline, bindings `0..65,535`, and a 256 KB payload arena (16-bit offsets in 4-byte units). The payload hash is truncated to 32 bits. The header's feature-flags field extends the format additively (bit 0: fast-lookup section — see above); unknown flags are rejected with `IUTQ1002`. A v1 blob is rejected with `IUTQ1002` (bad version); raising a cap means widening the field and bumping the version.
 
 Measured on a 200-timeline / 600-track / 8,000-clip / 25,200-boundary database with unique payloads: 595 KB → 316 KB (−47%). Structural savings are largest for long timelines (header 16 → 4 B) and interned templates (32 → 14 B); payload bytes are untouched and still dominate content-heavy blobs.
 
@@ -258,20 +296,24 @@ Namespaces mirror the folders: `Iutq.Core.Primitives`, `Iutq.Core.Baking`, `Iutq
 
 BenchmarkDotNet, .NET 10, Intel i9-14900K (`bench/Iutq.Bench`). Frame/Sample benchmarks include the per-frame setup (`AsView` + `Query` + `Tracks`). The bench's `GlobalSetup` verifies hand-computed outputs for every scenario before any measurement runs, so a perf run self-aborts on a semantic regression.
 
-| Method                   | Mean      | Allocated |
+| Method                   | Median    | Allocated |
 |--------------------------|----------:|----------:|
-| FrameExclusive           |  3.49 ns  | 0 B       |
-| FrameCrossFade           |  5.81 ns  | 0 B       |
-| SampleExclusive          |  3.04 ns  | 0 B       |
-| SampleCrossFade          |  5.95 ns  | 0 B       |
-| SampleFusedOneTrack      |  3.05 ns  | 0 B       |
-| SampleEightCursors       | 20.33 ns  | 0 B       |
-| VisitOneCursor           |  3.94 ns  | 0 B       |
-| VisitEightCursors        | 21.56 ns  | 0 B       |
-| TraverseForwardOneTick   |  5.70 ns  | 0 B       |
-| TraverseForwardFullLoop  |  8.38 ns  | 0 B       |
-| TraverseRewindTwentyFive |  8.33 ns  | 0 B       |
-| QuerySetupOnly           |  0.97 ns  | 0 B       |
+| FrameExclusive           |  4.82 ns  | 0 B       |
+| FrameCrossFade           |  7.87 ns  | 0 B       |
+| SampleExclusive          |  3.95 ns  | 0 B       |
+| SampleCrossFade          |  6.89 ns  | 0 B       |
+| SampleFusedOneTrack      |  4.25 ns  | 0 B       |
+| SampleEightCursors       | 24.72 ns  | 0 B       |
+| VisitOneCursor           |  6.09 ns  | 0 B       |
+| VisitEightCursors        | 26.00 ns  | 0 B       |
+| TraverseForwardOneTick   |  9.61 ns  | 0 B       |
+| TraverseForwardFullLoop  | 12.82 ns  | 0 B       |
+| TraverseRewindTwentyFive | 12.50 ns  | 0 B       |
+| QuerySetupOnly           |  1.25 ns  | 0 B       |
+| WideSampleFusedOneTrack  |  6.67 ns  | 0 B       |
+| WideTraverseForwardOneTick | 11.86 ns | 0 B      |
+
+`Wide*` scenarios use a 128-clip track over 256 ticks. Their fast-lookup twins (see the fast-lookup section above), measured in the same back-to-back session, land at **4.34 ns** and **9.88 ns**; the small scenarios' fast twins are unchanged (the thresholds leave them on the searched path).
 
 Same machine, V2 (`TimelineEngine`) comparison — steady-state loops with setup hoisted, best of 7, 20M ops, identical clip windows and payloads, Ryzen 5 8500G:
 

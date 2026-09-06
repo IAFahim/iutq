@@ -14,4 +14,9 @@ internal static class Fnv1A64
 
         return hash;
     }
+
+    public static ulong HashString(string name)
+    {
+        return Hash(System.Text.Encoding.UTF8.GetBytes(name));
+    }
 }

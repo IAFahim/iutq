@@ -25,7 +25,20 @@ public static class Format
     public const int MaxPayloadBytes = ushort.MaxValue * PayloadUnit;
 }
 
-public readonly record struct TimelineKey(ulong Value);
+public readonly record struct TimelineKey(ulong Value)
+{
+    /// <summary>
+    ///     Derives a stable key from a name (FNV-1a 64 over the UTF-8 bytes).
+    ///     Deterministic across processes and machines; zero is remapped to 1
+    ///     because 0 is reserved as the invalid key.
+    /// </summary>
+    public static TimelineKey FromName(string name)
+    {
+        var hash = Fnv1A64.HashString(name);
+
+        return new TimelineKey(hash == 0 ? 1 : hash);
+    }
+}
 
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public readonly struct TimelineIndex
@@ -69,6 +82,20 @@ public readonly struct ClipType<T>
         Check.TypeKeyNonZero(key);
 
         Key = key;
+    }
+
+    /// <summary>
+    ///     Derives a stable type key from a name (FNV-1a 64 over the UTF-8 bytes).
+    ///     Deterministic across processes and machines; zero is remapped to 1
+    ///     because 0 is reserved as the invalid key.
+    /// </summary>
+    [SuppressMessage("Performance", "CA1000:Do not declare static members on generic types",
+        Justification = "The factory must be generic to construct the phantom-typed ClipType<T>; a non-generic counterpart could not bind T.")]
+    public static ClipType<T> FromName(string name)
+    {
+        var hash = Fnv1A64.HashString(name);
+
+        return new ClipType<T>(hash == 0 ? 1 : hash);
     }
 }
 
