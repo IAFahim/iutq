@@ -5,37 +5,6 @@ using Iutq.Core.Querying;
 
 namespace Iutq.Core.Storage;
 
-/// <summary>
-///     Fast-lookup spans carved from the optional blob fast section. Empty
-///     (Present false) for flag-free v2 blobs; every query then behaves
-///     exactly as before.
-/// </summary>
-internal readonly ref struct FastLookupSections
-{
-    public readonly bool Present;
-    public readonly ReadOnlySpan<TrackFastData> Descriptors;
-    public readonly ReadOnlySpan<byte> Lut8;
-    public readonly ReadOnlySpan<ushort> Lut16;
-    public readonly ReadOnlySpan<ushort> Prefix;
-    public readonly ReadOnlySpan<float> BlendFactors;
-
-    public FastLookupSections(
-        bool present,
-        ReadOnlySpan<TrackFastData> descriptors,
-        ReadOnlySpan<byte> lut8,
-        ReadOnlySpan<ushort> lut16,
-        ReadOnlySpan<ushort> prefix,
-        ReadOnlySpan<float> blendFactors)
-    {
-        Present = present;
-        Descriptors = descriptors;
-        Lut8 = lut8;
-        Lut16 = lut16;
-        Prefix = prefix;
-        BlendFactors = blendFactors;
-    }
-}
-
 public readonly ref struct DatabaseView
 {
     public readonly ReadOnlySpan<TimelineHeader> Timelines;
@@ -47,7 +16,6 @@ public readonly ref struct DatabaseView
     public readonly ReadOnlySpan<TypeDescriptor> Types;
     public readonly ReadOnlySpan<TrackSpan> Directory;
     public readonly ReadOnlySpan<byte> Arena;
-    internal readonly FastLookupSections Fast;
 
     internal DatabaseView(
         ReadOnlySpan<TimelineHeader> timelines,
@@ -58,8 +26,7 @@ public readonly ref struct DatabaseView
         ReadOnlySpan<TrackBoundary> boundaries,
         ReadOnlySpan<TypeDescriptor> types,
         ReadOnlySpan<TrackSpan> directory,
-        ReadOnlySpan<byte> arena,
-        FastLookupSections fast)
+        ReadOnlySpan<byte> arena)
     {
         Timelines = timelines;
         TimelineLookup = timelineLookup;
@@ -70,7 +37,6 @@ public readonly ref struct DatabaseView
         Types = types;
         Directory = directory;
         Arena = arena;
-        Fast = fast;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

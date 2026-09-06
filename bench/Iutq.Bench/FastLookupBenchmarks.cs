@@ -118,10 +118,10 @@ public class FastLookupBenchmarks
     {
         var searchedView = _dbExclusiveSearched.AsView();
         var searched = searchedView.Query(_handleExclusive);
-        var fastView = _dbExclusive.AsView();
+        var fastView = _dbExclusive.AsFastView();
         var fast = fastView.Query(_handleExclusive);
 
-        for (var timeline = 0; timeline < fastView.Timelines.Length; timeline++)
+        for (var timeline = 0; timeline < fastView.View.Timelines.Length; timeline++)
         {
             var tracksSearched = searched.Tracks(new TimelineIndex(timeline));
             var tracksFast = fast.Tracks(new TimelineIndex(timeline));
@@ -131,7 +131,7 @@ public class FastLookupBenchmarks
                 ref readonly var trackSearched = ref tracksSearched[t];
                 ref readonly var trackFast = ref tracksFast[t];
 
-                for (var tick = 0; tick < fastView.Timelines[timeline].Duration; tick++)
+                for (var tick = 0; tick < fastView.View.Timelines[timeline].Duration; tick++)
                 {
                     var a = searched.Sample(in trackSearched, tick);
                     var b = fast.Sample(in trackFast, tick);
@@ -171,7 +171,7 @@ public class FastLookupBenchmarks
         }
 
         var crossSearched = _dbCrossFade.AsView().Query(_handleCrossFade);
-        var crossFast = _dbCrossFade.AsView().Query(_handleCrossFade);
+        var crossFast = _dbCrossFade.AsFastView().Query(_handleCrossFade);
         var crossTrackSearched = crossSearched.Tracks(_crossFadeTimeline)[0];
         var crossTrackFast = crossFast.Tracks(_crossFadeTimeline)[0];
 
@@ -193,7 +193,7 @@ public class FastLookupBenchmarks
         }
 
         var pulseSearched = _dbPulse.AsView().Query(_handlePulse);
-        var pulseFast = _dbPulse.AsView().Query(_handlePulse);
+        var pulseFast = _dbPulse.AsFastView().Query(_handlePulse);
 
         CompareTraverse(pulseSearched, pulseFast, 4, 5);
         CompareTraverse(pulseSearched, pulseFast, 0, 63);
@@ -202,7 +202,7 @@ public class FastLookupBenchmarks
 
         // Wide track: u8 LUT + prefix table paths, every tick and direction.
         var wideSearched = _dbWideSearched.AsView().Query(_handleWide);
-        var wideFast = _dbWide.AsView().Query(_handleWide);
+        var wideFast = _dbWide.AsFastView().Query(_handleWide);
         var wideTrackSearched = wideSearched.Tracks(_wideTimeline)[0];
         var wideTrackFast = wideFast.Tracks(_wideTimeline)[0];
 
@@ -244,7 +244,7 @@ public class FastLookupBenchmarks
         CompareTraverseWide(wideSearched, wideFast, 100, 5);
     }
 
-    private static void CompareTraverseWide(ClipQuery<BenchClip> searched, ClipQuery<BenchClip> fast, long previous, long current)
+    private static void CompareTraverseWide(ClipQuery<BenchClip> searched, FastQuery<BenchClip> fast, long previous, long current)
     {
         var span = new TimelineSpan(default, previous, current);
 
@@ -258,7 +258,7 @@ public class FastLookupBenchmarks
                 $"fast-lookup wide traverse drift for span ({previous}, {current}).");
     }
 
-    private static void CompareTraverse(ClipQuery<BenchClip> searched, ClipQuery<BenchClip> fast, long previous, long current)
+    private static void CompareTraverse(ClipQuery<BenchClip> searched, FastQuery<BenchClip> fast, long previous, long current)
     {
         var span = new TimelineSpan(default, previous, current);
 

@@ -18,6 +18,9 @@ public readonly ref struct ClipQuery<TClip>
         _directoryBase = checked(typeSlot * db.Timelines.Length);
     }
 
+    /// <summary>View this query is bound to (used by the fast-path kernel).</summary>
+    internal DatabaseView Database => _db;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadOnlySpan<TrackInstance> Tracks(TimelineIndex timelineIndex)
     {
@@ -85,19 +88,6 @@ public readonly ref struct ClipQuery<TClip>
     {
         ref readonly var data = ref TrackTemplateRef(in track);
 
-        if (_db.Fast.Present)
-        {
-            ref readonly var fast = ref _db.Fast.Descriptors[track.TrackTemplateId];
-
-            if (fast.LutWidth != 0 && (uint)tick < (uint)fast.LutCount)
-            {
-                var (indexA, indexB, factor) = FastActive(in fast, tick);
-                return data.Mode == TrackMode.Exclusive
-                    ? SampleExclusiveAt(in data, indexA)
-                    : SampleCrossFadeAt(in data, indexA, indexB, factor);
-            }
-        }
-
         return data.Mode == TrackMode.Exclusive
             ? SampleExclusive(in data, tick)
             : SampleCrossFade(in data, tick);
@@ -144,148 +134,6 @@ public readonly ref struct ClipQuery<TClip>
         }
     }
 
-    // ---- Lambda forms ----
-    // Non-capturing lambdas convert to these delegates without allocation and
-    // delete the per-system visitor struct. The visitor forms above remain the
-    // guaranteed-inlined maximum-control path; delegates are a monomorphic
-    // call the JIT usually inlines.
-
-    public delegate void SampleAction<TState>(ref TState state, in TrackInstance track, in TClip clip, float weight);
-
-    public delegate void FrameAction<TState>(ref TState state, in TrackInstance track, in ClipFrame frame, in TClip clip);
-
-    public delegate void ClipTransitionAction<TState>(
-        ref TState state,
-        in TrackInstance track,
-        in ClipTransition transition,
-        in TClip clip);
-
-    public delegate void BlendTransitionAction<TState>(
-        ref TState state,
-        in TrackInstance track,
-        in BlendTransition transition,
-        in TClip clipA,
-        in TClip clipB);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sample<TState>(
-        in TrackInstance track,
-        int tick,
-        ref TState state,
-        SampleAction<TState> action)
-    {
-        var samples = Sample(in track, tick);
-
-        while (samples.MoveNext())
-        {
-            var sample = samples.Current;
-            action(ref state, in track, in _db.Payload<TClip>(sample.DataOffset), sample.Weight);
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sample<TState>(
-        ReadOnlySpan<TimelineCursor> timelines,
-        ref TState state,
-        SampleAction<TState> action)
-    {
-        foreach (ref readonly var cursor in timelines)
-        foreach (ref readonly var track in Tracks(cursor.Timeline))
-        {
-            var samples = Sample(in track, cursor.Tick);
-
-            while (samples.MoveNext())
-            {
-                var sample = samples.Current;
-                action(ref state, in track, in _db.Payload<TClip>(sample.DataOffset), sample.Weight);
-            }
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void VisitFrames<TState>(
-        in TrackInstance track,
-        int tick,
-        TimelineDirection direction,
-        ref TState state,
-        FrameAction<TState> action)
-    {
-        var frames = VisitFrames(in track, tick, direction);
-
-        while (frames.MoveNext())
-        {
-            var frame = frames.Current;
-            action(ref state, in track, in frame, in _db.Payload<TClip>(frame.DataOffset));
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void VisitFrames<TState>(
-        ReadOnlySpan<TimelineCursor> timelines,
-        ref TState state,
-        FrameAction<TState> action)
-    {
-        foreach (ref readonly var cursor in timelines)
-        foreach (ref readonly var track in Tracks(cursor.Timeline))
-        {
-            var frames = VisitFrames(in track, in cursor);
-
-            while (frames.MoveNext())
-            {
-                var frame = frames.Current;
-                action(ref state, in track, in frame, in _db.Payload<TClip>(frame.DataOffset));
-            }
-        }
-    }
-
-    /// <summary>
-    ///     Lambda traversal. Two actions because a transition is either a clip
-    ///     or a blend occurrence. State is copied in and out of the adapter.
-    /// </summary>
-    public long TraverseTransitions<TState>(
-        in TimelineSpan span,
-        ref TState state,
-        ClipTransitionAction<TState> onClip,
-        BlendTransitionAction<TState> onBlend)
-    {
-        DelegateTransitionVisitor<TState> adapter = new(onClip, onBlend, state);
-        var emitted = TraverseTransitions(in span, ref adapter);
-        state = adapter.State;
-        return emitted;
-    }
-
-    private struct DelegateTransitionVisitor<TState> : IClipTransitionVisitor<TClip>
-    {
-        public TState State;
-
-        private readonly ClipTransitionAction<TState> _onClip;
-        private readonly BlendTransitionAction<TState> _onBlend;
-
-        public DelegateTransitionVisitor(
-            ClipTransitionAction<TState> onClip,
-            BlendTransitionAction<TState> onBlend,
-            TState state)
-        {
-            _onClip = onClip;
-            _onBlend = onBlend;
-            State = state;
-        }
-
-        public void OnClipTransition(in TrackInstance track, in ClipTransition transition, in TClip clip)
-        {
-            _onClip(ref State, in track, in transition, in clip);
-        }
-
-        public void OnBlendTransition(
-            in TrackInstance track,
-            in BlendTransition transition,
-            in TClip clipA,
-            in TClip clipB)
-        {
-            _onBlend(ref State, in track, in transition, in clipA, in clipB);
-        }
-    }
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ClipFrameEnumerator VisitFrames(
         in TrackInstance track,
@@ -301,19 +149,6 @@ public readonly ref struct ClipQuery<TClip>
         TimelineDirection direction)
     {
         ref readonly var data = ref TrackTemplateRef(in track);
-
-        if (_db.Fast.Present)
-        {
-            ref readonly var fast = ref _db.Fast.Descriptors[track.TrackTemplateId];
-
-            if (fast.LutWidth != 0 && (uint)tick < (uint)fast.LutCount)
-            {
-                var (indexA, indexB, factor) = FastActive(in fast, tick);
-                return data.Mode == TrackMode.Exclusive
-                    ? FrameExclusiveAt(in data, indexA, tick, direction)
-                    : FrameCrossFadeAt(in data, indexA, indexB, tick, direction, factor);
-            }
-        }
 
         return data.Mode == TrackMode.Exclusive
             ? FrameExclusive(in data, tick, direction)
@@ -397,78 +232,17 @@ public readonly ref struct ClipQuery<TClip>
             : TraverseReverse(single, in timeline, span.PreviousRawTick, span.CurrentRawTick, ref visitor);
     }
 
-    /// <summary>
-    ///     LUT hit: resolves the active clip indices within the template
-    ///     window (-1 = none) and the baked blend factor (only meaningful
-    ///     when both crossfade lanes are active).
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private (int IndexA, int IndexB, float Factor) FastActive(in TrackFastData fast, int tick)
-    {
-        if (fast.LutWidth == 1)
-            return (_db.Fast.Lut8[fast.LutStart + tick] - 1, -1, 0f);
-
-        if (fast.LutWidth == 2)
-            return (_db.Fast.Lut16[fast.LutStart + tick] - 1, -1, 0f);
-
-        if (fast.LutWidth == 3)
-        {
-            var baseIndex = fast.LutStart + tick * 2;
-            return (
-                _db.Fast.Lut8[baseIndex] - 1,
-                _db.Fast.Lut8[baseIndex + 1] - 1,
-                _db.Fast.BlendFactors[fast.FactorStart + tick]);
-        }
-
-        var offset = fast.LutStart + tick * 2;
-        return (
-            _db.Fast.Lut16[offset] - 1,
-            _db.Fast.Lut16[offset + 1] - 1,
-            _db.Fast.BlendFactors[fast.FactorStart + tick]);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ref readonly ClipEntry ClipAt(in TrackTemplate data, int index)
-    {
-        ref var first = ref MemoryMarshal.GetReference(_db.Clips);
-        return ref Unsafe.Add(ref first, (nint)(data.ClipStart + index));
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ClipSampleEnumerator SampleExclusiveAt(in TrackTemplate data, int index)
-    {
-        if (index < 0) return default;
-
-        ref readonly var clip = ref ClipAt(in data, index);
-        return new ClipSampleEnumerator(new ClipSample(clip.DataOffset, 1f));
-    }
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ClipSampleEnumerator SampleExclusive(in TrackTemplate data, int tick)
     {
-        return SampleExclusiveAt(in data, ActiveClipIndex(ClipSlice(in data, 0, data.ClipCount), tick));
-    }
+        var clips = ClipSlice(in data, 0, data.ClipCount);
+        var index = ActiveClipIndex(clips, tick);
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ClipSampleEnumerator SampleCrossFadeAt(in TrackTemplate data, int indexA, int indexB, float factor)
-    {
-        if (indexA < 0 && indexB < 0) return default;
+        if (index < 0) return default;
 
-        if (indexB < 0)
-            return new ClipSampleEnumerator(new ClipSample(ClipAt(in data, indexA).DataOffset, 1f));
-
-        if (indexA < 0)
-            return new ClipSampleEnumerator(new ClipSample(ClipAt(in data, indexB).DataOffset, 1f));
-
-        ref readonly var clipA = ref ClipAt(in data, indexA);
-        ref readonly var clipB = ref ClipAt(in data, indexB);
-
-        var weightB = clipB.Start >= clipA.Start ? factor : 1f - factor;
-        var weightA = 1f - weightB;
-
-        return new ClipSampleEnumerator(
-            new ClipSample(clipA.DataOffset, weightA),
-            new ClipSample(clipB.DataOffset, weightB));
+        ref var first = ref MemoryMarshal.GetReference(clips);
+        ref readonly var clip = ref Unsafe.Add(ref first, (nint)(uint)index);
+        return new ClipSampleEnumerator(new ClipSample(clip.DataOffset, 1f));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -480,41 +254,31 @@ public readonly ref struct ClipQuery<TClip>
         var indexA = ActiveClipIndex(laneA, tick);
         var indexB = ActiveClipIndex(laneB, tick);
 
-        // Lane-local indices become template-window indices for ClipAt.
-        if (indexB >= 0) indexB += data.LaneSplit;
+        if (indexA < 0 && indexB < 0) return default;
 
-        float factor = 0f;
+        ref var firstA = ref MemoryMarshal.GetReference(laneA);
+        ref var firstB = ref MemoryMarshal.GetReference(laneB);
 
-        if (indexA >= 0 && indexB >= 0)
-        {
-            ref readonly var clipA = ref ClipAt(in data, indexA);
-            ref readonly var clipB = ref ClipAt(in data, indexB);
-            factor = TimelineMath.BlendFactor(
-                tick,
-                Math.Max(clipA.Start, clipB.Start),
-                Math.Min(clipA.End, clipB.End));
-        }
+        if (indexB < 0)
+            return new ClipSampleEnumerator(new ClipSample(
+                Unsafe.Add(ref firstA, (nint)(uint)indexA).DataOffset, 1f));
 
-        return SampleCrossFadeAt(in data, indexA, indexB, factor);
-    }
+        if (indexA < 0)
+            return new ClipSampleEnumerator(new ClipSample(
+                Unsafe.Add(ref firstB, (nint)(uint)indexB).DataOffset, 1f));
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ClipFrameEnumerator FrameExclusiveAt(
-        in TrackTemplate data,
-        int index,
-        int tick,
-        TimelineDirection direction)
-    {
-        if (index < 0) return default;
+        ref readonly var clipA = ref Unsafe.Add(ref firstA, (nint)(uint)indexA);
+        ref readonly var clipB = ref Unsafe.Add(ref firstB, (nint)(uint)indexB);
+        var blendStart = Math.Max(clipA.Start, clipB.Start);
+        var blendEnd = Math.Min(clipA.End, clipB.End);
+        var factor = TimelineMath.BlendFactor(tick, blendStart, blendEnd);
 
-        ref readonly var clip = ref ClipAt(in data, index);
-        return new ClipFrameEnumerator(CreateFrame(
-            in clip,
-            tick,
-            direction,
-            BlendPhase.None,
-            1f,
-            0f));
+        var weightB = clipB.Start >= clipA.Start ? factor : 1f - factor;
+        var weightA = 1f - weightB;
+
+        return new ClipSampleEnumerator(
+            new ClipSample(clipA.DataOffset, weightA),
+            new ClipSample(clipB.DataOffset, weightB));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -523,53 +287,77 @@ public readonly ref struct ClipQuery<TClip>
         int tick,
         TimelineDirection direction)
     {
-        return FrameExclusiveAt(
-            in data,
-            ActiveClipIndex(ClipSlice(in data, 0, data.ClipCount), tick),
+        var clips = ClipSlice(in data, 0, data.ClipCount);
+        var index = ActiveClipIndex(clips, tick);
+
+        if (index < 0) return default;
+
+        ref var first = ref MemoryMarshal.GetReference(clips);
+        ref readonly var clip = ref Unsafe.Add(ref first, (nint)(uint)index);
+        var frame = CreateFrame(
+            in clip,
             tick,
-            direction);
+            direction,
+            BlendPhase.None,
+            1f,
+            0f);
+
+        return new ClipFrameEnumerator(in frame);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ClipFrameEnumerator FrameCrossFadeAt(
+    private ClipFrameEnumerator FrameCrossFade(
         in TrackTemplate data,
-        int indexA,
-        int indexB,
         int tick,
-        TimelineDirection direction,
-        float factor)
+        TimelineDirection direction)
     {
+        var laneA = ClipSlice(in data, 0, data.LaneSplit);
+        var laneB = ClipSlice(in data, data.LaneSplit, data.ClipCount - data.LaneSplit);
+
+        var indexA = ActiveClipIndex(laneA, tick);
+        var indexB = ActiveClipIndex(laneB, tick);
+
         if (indexA < 0 && indexB < 0) return default;
+
+        ref var firstA = ref MemoryMarshal.GetReference(laneA);
+        ref var firstB = ref MemoryMarshal.GetReference(laneB);
 
         if (indexB < 0)
         {
-            ref readonly var clip = ref ClipAt(in data, indexA);
-            return new ClipFrameEnumerator(CreateFrame(
+            ref readonly var clip = ref Unsafe.Add(ref firstA, (nint)(uint)indexA);
+            var frame = CreateFrame(
                 in clip,
                 tick,
                 direction,
                 BlendPhase.None,
                 1f,
-                0f));
+                0f);
+            return new ClipFrameEnumerator(in frame);
         }
 
         if (indexA < 0)
         {
-            ref readonly var clip = ref ClipAt(in data, indexB);
-            return new ClipFrameEnumerator(CreateFrame(
+            ref readonly var clip = ref Unsafe.Add(ref firstB, (nint)(uint)indexB);
+            var frame = CreateFrame(
                 in clip,
                 tick,
                 direction,
                 BlendPhase.None,
                 1f,
-                0f));
+                0f);
+            return new ClipFrameEnumerator(in frame);
         }
 
-        ref readonly var clipA = ref ClipAt(in data, indexA);
-        ref readonly var clipB = ref ClipAt(in data, indexB);
+        ref readonly var clipA = ref Unsafe.Add(ref firstA, (nint)(uint)indexA);
+        ref readonly var clipB = ref Unsafe.Add(ref firstB, (nint)(uint)indexB);
         var blendStart = Math.Max(clipA.Start, clipB.Start);
         var blendEnd = Math.Min(clipA.End, clipB.End);
-        var blendPhase = TimelineMath.BlendPhaseAt(tick, blendStart, blendEnd, direction);
+        var factor = TimelineMath.BlendFactor(tick, blendStart, blendEnd);
+        var blendPhase = TimelineMath.BlendPhaseAt(
+            tick,
+            blendStart,
+            blendEnd,
+            direction);
 
         var weightB = clipB.Start >= clipA.Start ? factor : 1f - factor;
         var weightA = 1f - weightB;
@@ -590,36 +378,6 @@ public readonly ref struct ClipQuery<TClip>
             factor);
 
         return new ClipFrameEnumerator(in frameA, in frameB);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ClipFrameEnumerator FrameCrossFade(
-        in TrackTemplate data,
-        int tick,
-        TimelineDirection direction)
-    {
-        var laneA = ClipSlice(in data, 0, data.LaneSplit);
-        var laneB = ClipSlice(in data, data.LaneSplit, data.ClipCount - data.LaneSplit);
-
-        var indexA = ActiveClipIndex(laneA, tick);
-        var indexB = ActiveClipIndex(laneB, tick);
-
-        // Lane-local indices become template-window indices for ClipAt.
-        if (indexB >= 0) indexB += data.LaneSplit;
-
-        float factor = 0f;
-
-        if (indexA >= 0 && indexB >= 0)
-        {
-            ref readonly var clipA = ref ClipAt(in data, indexA);
-            ref readonly var clipB = ref ClipAt(in data, indexB);
-            factor = TimelineMath.BlendFactor(
-                tick,
-                Math.Max(clipA.Start, clipB.Start),
-                Math.Min(clipA.End, clipB.End));
-        }
-
-        return FrameCrossFadeAt(in data, indexA, indexB, tick, direction, factor);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -874,74 +632,9 @@ public readonly ref struct ClipQuery<TClip>
                 ref Unsafe.Add(ref boundariesFirst, (nint)(uint)data.BoundaryStart),
                 data.BoundaryCount);
 
-            if (_db.Fast.Present)
-            {
-                ref readonly var fast = ref _db.Fast.Descriptors[track.TrackTemplateId];
-
-                if (fast.PrefixCount != 0 && (uint)localHigh + 1 < (uint)fast.PrefixCount)
-                {
-                    // Prefix table: boundaries[Tick >= localLow] ..
-                    // boundaries[Tick > localHigh] without a search.
-                    var from = _db.Fast.Prefix[fast.PrefixStart + localLow];
-                    var to = _db.Fast.Prefix[fast.PrefixStart + localHigh + 1];
-
-                    emitted += direction == TimelineDirection.Forward
-                        ? EmitForwardWindow(in track, in data, boundaries, from, to, cycle, duration, ref visitor)
-                        : EmitReverseWindow(in track, in data, boundaries, from, to, cycle, duration, ref visitor);
-
-                    continue;
-                }
-            }
-
             emitted += direction == TimelineDirection.Forward
                 ? EmitForwardTrack(in track, in data, boundaries, localLow, localHigh, cycle, duration, ref visitor)
                 : EmitReverseTrack(in track, in data, boundaries, localLow, localHigh, cycle, duration, ref visitor);
-        }
-
-        return emitted;
-    }
-
-    private long EmitForwardWindow<TVisitor>(
-        in TrackInstance track,
-        in TrackTemplate data,
-        ReadOnlySpan<TrackBoundary> boundaries,
-        int from,
-        int to,
-        long cycle,
-        int duration,
-        ref TVisitor visitor)
-        where TVisitor : struct, IClipTransitionVisitor<TClip>
-    {
-        long emitted = 0;
-
-        for (var index = from; index < to; index++)
-        {
-            ref readonly var boundary = ref Unsafe.Add(ref MemoryMarshal.GetReference(boundaries), (nint)(uint)index);
-            EmitBoundary(in track, in data, in boundary, cycle, duration, TimelineDirection.Forward, ref visitor);
-            emitted++;
-        }
-
-        return emitted;
-    }
-
-    private long EmitReverseWindow<TVisitor>(
-        in TrackInstance track,
-        in TrackTemplate data,
-        ReadOnlySpan<TrackBoundary> boundaries,
-        int from,
-        int to,
-        long cycle,
-        int duration,
-        ref TVisitor visitor)
-        where TVisitor : struct, IClipTransitionVisitor<TClip>
-    {
-        long emitted = 0;
-
-        for (var index = to - 1; index >= from; index--)
-        {
-            ref readonly var boundary = ref Unsafe.Add(ref MemoryMarshal.GetReference(boundaries), (nint)(uint)index);
-            EmitBoundary(in track, in data, in boundary, cycle, duration, TimelineDirection.Reverse, ref visitor);
-            emitted++;
         }
 
         return emitted;
@@ -1185,6 +878,148 @@ public readonly ref struct ClipQuery<TClip>
         return value >= 0 || wideQuotient * divisor == value
             ? wideQuotient
             : wideQuotient - 1;
+    }
+
+    // ---- Lambda forms ----
+    // Non-capturing lambdas convert to these delegates without allocation and
+    // delete the per-system visitor struct. The visitor forms above remain the
+    // guaranteed-inlined maximum-control path; delegates are a monomorphic
+    // call the JIT usually inlines.
+
+    public delegate void SampleAction<TState>(ref TState state, in TrackInstance track, in TClip clip, float weight);
+
+    public delegate void FrameAction<TState>(ref TState state, in TrackInstance track, in ClipFrame frame, in TClip clip);
+
+    public delegate void ClipTransitionAction<TState>(
+        ref TState state,
+        in TrackInstance track,
+        in ClipTransition transition,
+        in TClip clip);
+
+    public delegate void BlendTransitionAction<TState>(
+        ref TState state,
+        in TrackInstance track,
+        in BlendTransition transition,
+        in TClip clipA,
+        in TClip clipB);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Sample<TState>(
+        in TrackInstance track,
+        int tick,
+        ref TState state,
+        SampleAction<TState> action)
+    {
+        var samples = Sample(in track, tick);
+
+        while (samples.MoveNext())
+        {
+            var sample = samples.Current;
+            action(ref state, in track, in _db.Payload<TClip>(sample.DataOffset), sample.Weight);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Sample<TState>(
+        ReadOnlySpan<TimelineCursor> timelines,
+        ref TState state,
+        SampleAction<TState> action)
+    {
+        foreach (ref readonly var cursor in timelines)
+        foreach (ref readonly var track in Tracks(cursor.Timeline))
+        {
+            var samples = Sample(in track, cursor.Tick);
+
+            while (samples.MoveNext())
+            {
+                var sample = samples.Current;
+                action(ref state, in track, in _db.Payload<TClip>(sample.DataOffset), sample.Weight);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void VisitFrames<TState>(
+        in TrackInstance track,
+        int tick,
+        TimelineDirection direction,
+        ref TState state,
+        FrameAction<TState> action)
+    {
+        var frames = VisitFrames(in track, tick, direction);
+
+        while (frames.MoveNext())
+        {
+            var frame = frames.Current;
+            action(ref state, in track, in frame, in _db.Payload<TClip>(frame.DataOffset));
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void VisitFrames<TState>(
+        ReadOnlySpan<TimelineCursor> timelines,
+        ref TState state,
+        FrameAction<TState> action)
+    {
+        foreach (ref readonly var cursor in timelines)
+        foreach (ref readonly var track in Tracks(cursor.Timeline))
+        {
+            var frames = VisitFrames(in track, in cursor);
+
+            while (frames.MoveNext())
+            {
+                var frame = frames.Current;
+                action(ref state, in track, in frame, in _db.Payload<TClip>(frame.DataOffset));
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Lambda traversal. Two actions because a transition is either a clip
+    ///     or a blend occurrence. State is copied in and out of the adapter.
+    /// </summary>
+    public long TraverseTransitions<TState>(
+        in TimelineSpan span,
+        ref TState state,
+        ClipTransitionAction<TState> onClip,
+        BlendTransitionAction<TState> onBlend)
+    {
+        DelegateTransitionVisitor<TState> adapter = new(onClip, onBlend, state);
+        var emitted = TraverseTransitions(in span, ref adapter);
+        state = adapter.State;
+        return emitted;
+    }
+
+    private struct DelegateTransitionVisitor<TState> : IClipTransitionVisitor<TClip>
+    {
+        public TState State;
+
+        private readonly ClipTransitionAction<TState> _onClip;
+        private readonly BlendTransitionAction<TState> _onBlend;
+
+        public DelegateTransitionVisitor(
+            ClipTransitionAction<TState> onClip,
+            BlendTransitionAction<TState> onBlend,
+            TState state)
+        {
+            _onClip = onClip;
+            _onBlend = onBlend;
+            State = state;
+        }
+
+        public void OnClipTransition(in TrackInstance track, in ClipTransition transition, in TClip clip)
+        {
+            _onClip(ref State, in track, in transition, in clip);
+        }
+
+        public void OnBlendTransition(
+            in TrackInstance track,
+            in BlendTransition transition,
+            in TClip clipA,
+            in TClip clipB)
+        {
+            _onBlend(ref State, in track, in transition, in clipA, in clipB);
+        }
     }
 }
 

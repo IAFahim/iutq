@@ -707,7 +707,7 @@ public sealed class TimelineQueryTests
         var (searched, fast) = BuildParityPair();
 
         var qa = searched.AsView().Query(TestTypes.Clip);
-        var qb = fast.AsView().Query(TestTypes.Clip);
+        var qb = fast.AsFastView().Query(TestTypes.Clip);
 
         // (previous, current) pairs: single-tick, rewind, loop crossings, full span.
         (long Previous, long Current, TimelineIndex Timeline)[] spans =
@@ -747,7 +747,7 @@ public sealed class TimelineQueryTests
 
         var loaded = TimelineDatabase.Load(fast.ToArray());
         var qa = searched.AsView().Query(TestTypes.Clip);
-        var qb = loaded.AsView().Query(TestTypes.Clip);
+        var qb = loaded.AsFastView().Query(TestTypes.Clip);
 
         var trackA = qa.Tracks(new TimelineIndex(0))[0];
         var trackB = qb.Tracks(new TimelineIndex(0))[0];
@@ -816,7 +816,7 @@ public sealed class TimelineQueryTests
         // Timeline 2 (duration 3000) exceeds every LUT strategy: both
         // databases must still agree tick for tick.
         var qa = searched.AsView().Query(TestTypes.Clip);
-        var qb = fast.AsView().Query(TestTypes.Clip);
+        var qb = fast.AsFastView().Query(TestTypes.Clip);
         var trackA = qa.Tracks(new TimelineIndex(2))[0];
         var trackB = qb.Tracks(new TimelineIndex(2))[0];
 

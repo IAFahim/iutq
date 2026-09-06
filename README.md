@@ -239,11 +239,29 @@ damage.TraverseTransitions(
 - **tick → boundary prefix tables** for tracks with more than 8 boundaries — traversal window selection becomes two loads instead of a binary search.
 - Blend factors are baked with the exact op order the kernel uses, so weights are **bit-identical** between the searched and fast paths (asserted by test, and again by the benchmark's GlobalSetup).
 
-Thresholds matter: below 8 clips per lane the searched path is already a short comparison chain over one cache line, and a LUT indirection only adds dependent loads — the same lesson the source-generated kernels learned. Databases where nothing qualifies bake no section at all and keep the exact searched-path shape. Areas cap at 65,535 entries (16-bit offsets); templates shared across timelines of different durations stay searched.
+The feature is fully isolated from the classic path: `database.AsView()` is byte-for-byte the pre-feature API and kernel, and `database.AsFastView()` is the opt-in binding for fast queries. `FastQuery<TClip>` mirrors the `ClipQuery<TClip>` surface (sampling, frames, traversal, fused visitor and lambda forms) and falls back to the searched kernel for any track or tick the baked structures do not cover — the two paths return bit-identical results everywhere.
+
+```cs
+var force = database.AsFastView().Query(forceHandle);   // LUT-backed when baked, searched fallback otherwise
+force.Sample(activeTimelines, ref accumulator);          // same call shape as ClipQuery
+```
+
+Honest measured value on desktop silicon (i9-14900K, pinned to P-cores, searched-vs-fast pairs measured **in the same process** because between-process variance on a desktop OS exceeds the deltas):
+
+| scenario (same-process pair)                    | searched  | fast-lookup |
+|-------------------------------------------------|----------:|------------:|
+| SampleCrossFade (two lanes, per-tick blend)     |  5.70 ns  |  **5.31 ns (−7%)** |
+| SampleFusedOneTrack (4-clip track)              |  2.90 ns  |  2.90 ns (tie) |
+| VisitOneCursor                                  |  3.91 ns  |  4.02 ns (tie) |
+| TraverseForwardOneTick (small track)            |  5.19 ns  |  5.74 ns (probe cost) |
+| Wide sample (128-clip track)                    |  5.9–6.1 ns | 5.7–6.2 ns (parity) |
+| Wide traverse (256-boundary prefix table)       |  7.82 ns  |  7.92 ns (tie) |
+
+Read honestly: removing two binary searches and a per-tick division pays off reproducibly only on crossfade sampling; everywhere else the searched kernel over small hot data is already at memory-speed parity, and binding `FastQuery` to non-qualifying tracks costs the descriptor probe (~0.1–0.6 ns). Thresholds keep small tracks un-baked, and databases that qualify nothing bake no section at all. Areas cap at 65,535 entries (16-bit offsets); templates shared across timelines of different durations stay searched.
 
 `Load()` fully revalidates the section — descriptor bounds, entry sentinels, prefix monotonicity, area geometry — and rejects corrupt data with `IUTQ1006`; it is never trusted blindly.
 
-Measured, same session (i9-14900K): sampling a 128-clip track **6.67 → 4.34 ns (−35%)**, single-tick traversal over its 256 boundaries **11.86 → 9.88 ns (−17%)**; tracks below the thresholds measure unchanged. For the last mile — payload addresses baked into code, zero lookups at all — see the source-generated frozen kernels on the `waffle-lut` branch.
+For the last mile — payload addresses baked into code, zero lookups at all, ~10× on hot sampling paths — see the source-generated frozen kernels on the `waffle-lut` branch; runtime LUTs recover only a fraction of that.
 
 ## Removed from V2
 
@@ -298,22 +316,22 @@ BenchmarkDotNet, .NET 10, Intel i9-14900K (`bench/Iutq.Bench`). Frame/Sample ben
 
 | Method                   | Median    | Allocated |
 |--------------------------|----------:|----------:|
-| FrameExclusive           |  4.82 ns  | 0 B       |
-| FrameCrossFade           |  7.87 ns  | 0 B       |
-| SampleExclusive          |  3.95 ns  | 0 B       |
-| SampleCrossFade          |  6.89 ns  | 0 B       |
-| SampleFusedOneTrack      |  4.25 ns  | 0 B       |
-| SampleEightCursors       | 24.72 ns  | 0 B       |
-| VisitOneCursor           |  6.09 ns  | 0 B       |
-| VisitEightCursors        | 26.00 ns  | 0 B       |
-| TraverseForwardOneTick   |  9.61 ns  | 0 B       |
-| TraverseForwardFullLoop  | 12.82 ns  | 0 B       |
-| TraverseRewindTwentyFive | 12.50 ns  | 0 B       |
-| QuerySetupOnly           |  1.25 ns  | 0 B       |
-| WideSampleFusedOneTrack  |  6.67 ns  | 0 B       |
-| WideTraverseForwardOneTick | 11.86 ns | 0 B      |
+| FrameExclusive           |  3.20 ns  | 0 B       |
+| FrameCrossFade           |  6.07 ns  | 0 B       |
+| SampleExclusive          |  2.87 ns  | 0 B       |
+| SampleCrossFade          |  5.74 ns  | 0 B       |
+| SampleFusedOneTrack      |  2.90 ns  | 0 B       |
+| SampleEightCursors       | 19.35 ns  | 0 B       |
+| VisitOneCursor           |  3.91 ns  | 0 B       |
+| VisitEightCursors        | 21.10 ns  | 0 B       |
+| TraverseForwardOneTick   |  5.48 ns  | 0 B       |
+| TraverseForwardFullLoop  |  8.76 ns  | 0 B       |
+| TraverseRewindTwentyFive |  8.54 ns  | 0 B       |
+| QuerySetupOnly           |  0.87 ns  | 0 B       |
+| WideSampleFusedOneTrack  |  6.11 ns  | 0 B       |
+| WideTraverseForwardOneTick |  7.56 ns | 0 B      |
 
-`Wide*` scenarios use a 128-clip track over 256 ticks. Their fast-lookup twins (see the fast-lookup section above), measured in the same back-to-back session, land at **4.34 ns** and **9.88 ns**; the small scenarios' fast twins are unchanged (the thresholds leave them on the searched path).
+Measured pinned to P-cores on the hybrid desktop CPU (unpinned runs on a desktop OS land on E-cores and shift absolute numbers by up to 2×); `Wide*` scenarios use a 128-clip track over 256 ticks. Absolute values still wobble a few percent between benchmark processes — comparisons that matter are measured as searched-vs-fast pairs inside one process (see the fast-lookup section above), and flag-off parity against the pre-feature commit was verified the same way: every scenario within run noise, `QuerySetupOnly` 0.88 vs 0.87 ns.
 
 Same machine, V2 (`TimelineEngine`) comparison — steady-state loops with setup hoisted, best of 7, 20M ops, identical clip windows and payloads, Ryzen 5 8500G:
 

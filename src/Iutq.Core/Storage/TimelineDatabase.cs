@@ -383,8 +383,18 @@ public sealed class TimelineDatabase
             _sections.Boundaries,
             _sections.Types,
             _sections.Directory,
-            _sections.Arena,
-            _sections.FastLookup);
+            _sections.Arena);
+    }
+
+    /// <summary>
+    ///     View for databases baked with the fast-lookup section. Binds fast
+    ///     queries; falls back to searched semantics for uncovered tracks and
+    ///     ticks, so results are identical to <see cref="AsView" />.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public FastDatabaseView AsFastView()
+    {
+        return new FastDatabaseView(AsView(), _sections.FastLookup);
     }
 
     public ClipTypeHandle<TClip> Resolve<TClip>(ClipType<TClip> type)
