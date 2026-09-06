@@ -261,7 +261,7 @@ Read honestly: removing two binary searches and a per-tick division pays off rep
 
 `Load()` fully revalidates the section — descriptor bounds, entry sentinels, prefix monotonicity, area geometry — and rejects corrupt data with `IUTQ1006`; it is never trusted blindly.
 
-For the last mile — payload addresses baked into code, zero lookups at all, ~10× on hot sampling paths — see the source-generated frozen kernels on the `waffle-lut` branch; runtime LUTs recover only a fraction of that.
+For the last mile — payload addresses baked into code, zero lookups at all — see the source-generated frozen kernels on the `waffle-lut` branch; runtime LUTs recover only a fraction of that. The frozen numbers are verified under the same pinned, same-process protocol: **sample one track 3.06 → 0.16 ns (19×), sample eight cursors 19.44 → 0.34 ns (57×), crossfade 5.48 → 0.63 ns (8.7×), single-tick traversal 5.54 → 1.33 ns (4.2×)**; multi-event traversal ties because visitor calls dominate. The frozen kernel deletes the whole generic call chain (view, query, directory, template, weights), which is something no runtime data structure can do for dynamic content — the two tiers compose: frozen for build-time content, blob runtime for everything else.
 
 ## Removed from V2
 
